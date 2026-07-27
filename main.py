@@ -30,6 +30,7 @@ current_position = None  # None atau dict {'entry_price': float, 'amount': float
 
 
 # --- SCHEMA PAYLOAD WEBHOOK ---
+# 1. Update Skema Payload agar Fleksibel Menerima Tipe Data
 class StrategyPayload(BaseModel):
     symbol: str
     rsi_period: int
@@ -37,6 +38,15 @@ class StrategyPayload(BaseModel):
     rsi_upper: float
     stop_loss_pct: float
     take_profit_pct: float
+
+    class Config:
+        coerce_numbers_to_str = False # Memastikan parsing angka presisi
+
+
+# 2. Tambahkan Endpoint Root untuk Mencegah Error 404 dari Railway Health Check
+@app.get("/")
+async def root_check():
+    return {"status": "ok", "service": "OKX Trade Executor"}
 
 
 # --- OKX CLIENT INITIALIZATION ---
