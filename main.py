@@ -1,11 +1,11 @@
 import asyncio
 import logging
 import ccxt.async_support as ccxt
-from fastapi import FastAPI, HTTPException, Header, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 import pandas as pd
 import numpy as np
-from config import Config
+import os
 
 # Setup Logging
 logging.basicConfig(
@@ -13,24 +13,41 @@ logging.basicConfig(
 )
 logger = logging.getLogger("OKX-Executor")
 
-app = FastAPI(title="OKX Trade Executor Engine")
+app = FastAPI(title="OKX Paper Trading Executor Engine")
+
+# --- CONFIGURATION ---
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "my_secret_token_123")
+TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "20.0"))
+PORT = int(os.getenv("PORT", "8080"))
 
 # --- GLOBAL IN-MEMORY STATE ---
 active_strategy = {
-    "symbol": "ADA/USDT",
+    "symbol": "BTC/USDT",
     "rsi_period": 14,
-    "rsi_lower": 23.0,
-    "rsi_upper": 60.0,
-    "stop_loss_pct": 0.025,
-    "take_profit_pct": 0.070,
+    "rsi_lower": 30.0,
+    "rsi_upper": 70.0,
+    "stop_loss_pct": 0.02,
+    "take_profit_pct": 0.05,
     "is_active": True,
 }
 
-current_position = None  # None atau dict {'entry_price': float, 'amount': float, 'sl': float, 'tp': float}
+# State Posisi Aktif (None jika tidak ada posisi)
+current_position = None
+
+# History Transactions & Stats Tracker
+trade_history = []
+stats = {
+    "initial_balance": 1000.0,
+    "current_balance": 1000.0,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "total_pnl_usdt": 0.0,
+    "win_rate_pct": 0.0,
+}
 
 
 # --- SCHEMA PAYLOAD WEBHOOK ---
-# 1. Update Skema Payload agar Fleksibel Menerima Tipe Data
 class StrategyPayload(BaseModel):
     symbol: str
     rsi_period: int
@@ -38,30 +55,6 @@ class StrategyPayload(BaseModel):
     rsi_upper: float
     stop_loss_pct: float
     take_profit_pct: float
-
-    class Config:
-        coerce_numbers_to_str = False # Memastikan parsing angka presisi
-
-
-# 2. Tambahkan Endpoint Root untuk Mencegah Error 404 dari Railway Health Check
-@app.get("/")
-async def root_check():
-    return {"status": "ok", "service": "OKX Trade Executor"}
-
-
-# --- OKX CLIENT INITIALIZATION ---
-def get_okx_exchange():
-    exchange = ccxt.okx(
-        {
-            "apiKey": Config.OKX_API_KEY,
-            "secret": Config.OKX_SECRET_KEY,
-            "password": Config.OKX_PASSPHRASE,
-            "enableRateLimit": True,
-        }
-    )
-    if Config.OKX_SANDBOX:
-        exchange.set_sandbox_mode(True)
-    return exchange
 
 
 # --- CALCULATION HELPER ---
@@ -79,10 +72,7 @@ def calculate_rsi(series: pd.Series, period: int) -> float:
 async def update_strategy(
     payload: StrategyPayload, authorization: str = Header(None)
 ):
-    """
-    Endpoint yang dipanggil oleh Repo 1 (Research Engine) saat menemukan Winner Strategy baru
-    """
-    if authorization != f"Bearer {Config.WEBHOOK_SECRET}":
+    if authorization != f"Bearer {WEBHOOK_SECRET}":
         raise HTTPException(
             status_code=401, detail="Unauthorized Webhook Secret"
         )
@@ -101,10 +91,10 @@ async def update_strategy(
     )
 
     logger.info(
-        f"🔥 [Hot-Reload] New Strategy Received for [{payload.symbol}]!"
+        f"🔥 [Hot-Reload] Strategy Updated for [{payload.symbol}]!"
     )
     logger.info(
-        f"   RSI Period: {payload.rsi_period} | Buy Threshold: < {payload.rsi_lower} | Sell Threshold: > {payload.rsi_upper}"
+        f"   RSI({payload.rsi_period}) | Buy: < {payload.rsi_lower} | Sell: > {payload.rsi_upper} | SL: {payload.stop_loss_pct*100:.1f}% | TP: {payload.take_profit_pct*100:.1f}%"
     )
 
     return {
@@ -113,19 +103,36 @@ async def update_strategy(
     }
 
 
-@app.get("/health")
-async def health_check():
+# --- MONITORING ENDPOINTS ---
+@app.get("/")
+async def root_check():
+    return {"status": "ok", "service": "OKX Paper Trading Executor"}
+
+
+@app.get("/position")
+async def get_active_position():
+    """Melihat detail posisi yang sedang terbuka saat ini"""
+    if current_position is None:
+        return {"has_position": False, "message": "No active position."}
+    return {"has_position": True, "position": current_position}
+
+
+@app.get("/stats")
+async def get_performance_stats():
+    """Melihat statistik PnL dan histori transaksi paper trading"""
     return {
-        "status": "online",
-        "active_symbol": active_strategy.get("symbol"),
-        "has_position": current_position is not None,
+        "summary": stats,
+        "active_strategy": active_strategy,
+        "recent_trades": trade_history[-10:],  # 10 transaksi terakhir
     }
 
 
 # --- BACKGROUND EXECUTION LOOP ---
 async def execution_loop():
-    global current_position
-    logger.info("⚡ Execution Loop Started. Monitoring OKX Price Action...")
+    global current_position, stats, trade_history
+    logger.info("⚡ Paper Trading Execution Loop Started. Monitoring OKX Public Feed...")
+
+    exchange = ccxt.okx({"enableRateLimit": True})
 
     while True:
         try:
@@ -136,12 +143,8 @@ async def execution_loop():
             symbol = active_strategy["symbol"]
             period = active_strategy["rsi_period"]
 
-            exchange = get_okx_exchange()
-
-            # 1. Fetch Latest Candles dari OKX
+            # 1. Fetch Price Feed dari OKX Public REST API
             ohlcv = await exchange.fetch_ohlcv(symbol, timeframe="1h", limit=100)
-            await exchange.close()
-
             df = pd.DataFrame(
                 ohlcv,
                 columns=["timestamp", "open", "high", "low", "close", "volume"],
@@ -149,107 +152,133 @@ async def execution_loop():
             current_price = float(df["close"].iloc[-1])
             current_rsi = calculate_rsi(df["close"], period)
 
-            logger.info(
-                f"📊 [{symbol}] Price: ${current_price:,.4f} | RSI({period}): {current_rsi:.2f}"
-            )
-
-            # 2. LOGIC EKSEKUSI TRADE
-            # A. Jika Belum Punya Posisi -> Cek Sinyal BUY
+            # 2. STRATEGY EVALUATION & POSITION MONITORING
             if current_position is None:
+                # --- NO POSITION: Check for BUY Signal ---
+                logger.info(
+                    f"👀 [{symbol}] Price: ${current_price:,.4f} | RSI({period}): {current_rsi:.2f} (Target Buy: < {active_strategy['rsi_lower']})"
+                )
+
                 if current_rsi < active_strategy["rsi_lower"]:
-                    logger.info(
-                        f"🟢 BUY SIGNAL MATCHED! RSI ({current_rsi:.2f}) < Threshold ({active_strategy['rsi_lower']})"
-                    )
+                    amount = TRADE_AMOUNT_USDT / current_price
+                    sl_price = current_price * (1 - active_strategy["stop_loss_pct"])
+                    tp_price = current_price * (1 + active_strategy["take_profit_pct"])
 
-                    # Hitung Order Amount berdasarkan USDT Allocation
-                    amount = Config.TRADE_AMOUNT_USDT / current_price
-
-                    # Simulasi / Live Order Execution
-                    if Config.OKX_API_KEY:
-                        exchange_live = get_okx_exchange()
-                        order = await exchange_live.create_market_buy_order(
-                            symbol, amount
-                        )
-                        await exchange_live.close()
-                        logger.info(f"✅ Market BUY Order Executed: {order['id']}")
-                    else:
-                        logger.info("⚠️ [Paper Trade] Simulating Market BUY Order...")
-
-                    # Record State Posisi
-                    sl_price = current_price * (
-                        1 - active_strategy["stop_loss_pct"]
-                    )
-                    tp_price = current_price * (
-                        1 + active_strategy["take_profit_pct"]
-                    )
                     current_position = {
+                        "symbol": symbol,
                         "entry_price": current_price,
+                        "current_price": current_price,
                         "amount": amount,
-                        "sl": sl_price,
-                        "tp": tp_price,
+                        "invested_usdt": TRADE_AMOUNT_USDT,
+                        "stop_loss_price": sl_price,
+                        "take_profit_price": tp_price,
+                        "floating_pnl_pct": 0.0,
+                        "entry_time": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
                     }
-                    logger.info(
-                        f"🎯 Position Opened | SL: ${sl_price:,.4f} | TP: ${tp_price:,.4f}"
-                    )
 
-            # B. Jika Sedang Punya Posisi -> Cek Stop Loss, Take Profit, atau RSI EXIT
+                    logger.info("=" * 60)
+                    logger.info(f"🟢 [PAPER TRADE] MARKET BUY EXECUTED for [{symbol}]")
+                    logger.info(f"   Entry Price : ${current_price:,.4f}")
+                    logger.info(f"   Position Size: {amount:.4f} {symbol.split('/')[0]} (${TRADE_AMOUNT_USDT} USDT)")
+                    logger.info(f"   Stop Loss    : ${sl_price:,.4f} (-{active_strategy['stop_loss_pct']*100:.1f}%)")
+                    logger.info(f"   Take Profit  : ${tp_price:,.4f} (+{active_strategy['take_profit_pct']*100:.1f}%)")
+                    logger.info("=" * 60)
+
             else:
-                entry = current_position["entry_price"]
-                sl = current_position["sl"]
-                tp = current_position["tp"]
+                # --- HAS POSITION: Track PnL & Check EXIT Signals ---
+                pos_symbol = current_position["symbol"]
 
+                # Handle jika ada hot-reload symbol saat posisi masih terbuka
+                if pos_symbol != symbol:
+                    fetch_pos_ohlcv = await exchange.fetch_ohlcv(pos_symbol, timeframe="1h", limit=50)
+                    pos_df = pd.DataFrame(fetch_pos_ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+                    check_price = float(pos_df["close"].iloc[-1])
+                    check_rsi = calculate_rsi(pos_df["close"], period)
+                else:
+                    check_price = current_price
+                    check_rsi = current_rsi
+
+                entry_p = current_position["entry_price"]
+                sl_p = current_position["stop_loss_price"]
+                tp_p = current_position["take_profit_price"]
+
+                # Update Floating Stats
+                floating_pnl_pct = ((check_price - entry_p) / entry_p) * 100
+                current_position["current_price"] = check_price
+                current_position["floating_pnl_pct"] = floating_pnl_pct
+
+                logger.info(
+                    f"📈 [{pos_symbol} POSITION ACTIVE] Current: ${check_price:,.4f} | Entry: ${entry_p:,.4f} | PnL: {floating_pnl_pct:+.2f}% | RSI: {check_rsi:.2f}"
+                )
+
+                # Check Exit Trigger
                 should_close = False
-                reason = ""
+                exit_reason = ""
 
-                if current_price <= sl:
+                if check_price <= sl_p:
                     should_close = True
-                    reason = "STOP LOSS HIT"
-                elif current_price >= tp:
+                    exit_reason = "STOP LOSS HIT 🔴"
+                elif check_price >= tp_p:
                     should_close = True
-                    reason = "TAKE PROFIT HIT"
-                elif current_rsi > active_strategy["rsi_upper"]:
+                    exit_reason = "TAKE PROFIT HIT 🟢"
+                elif check_rsi > active_strategy["rsi_upper"]:
                     should_close = True
-                    reason = (
-                        f"RSI EXIT SIGNAL ({current_rsi:.2f} > {active_strategy['rsi_upper']})"
-                    )
+                    exit_reason = f"RSI OVERBOUGHT SIGNAL ({check_rsi:.1f} > {active_strategy['rsi_upper']}) 🟡"
 
                 if should_close:
-                    logger.info(
-                        f"🔴 CLOSING POSITION ({reason}) at ${current_price:,.4f}"
-                    )
+                    realized_pnl_usdt = (check_price - entry_p) * current_position["amount"]
+                    realized_pnl_pct = floating_pnl_pct
 
-                    if Config.OKX_API_KEY:
-                        exchange_live = get_okx_exchange()
-                        order = await exchange_live.create_market_sell_order(
-                            symbol, current_position["amount"]
-                        )
-                        await exchange_live.close()
-                        logger.info(
-                            f"✅ Market SELL Order Executed: {order['id']}"
-                        )
+                    # Update Portfolio Balance & Stats
+                    stats["total_trades"] += 1
+                    stats["total_pnl_usdt"] += realized_pnl_usdt
+                    stats["current_balance"] += realized_pnl_usdt
+
+                    if realized_pnl_usdt >= 0:
+                        stats["winning_trades"] += 1
                     else:
-                        logger.info(
-                            "⚠️ [Paper Trade] Simulating Market SELL Order..."
-                        )
+                        stats["losing_trades"] += 1
 
-                    pnl_pct = (current_price - entry) / entry * 100
-                    logger.info(f"💵 Closed Trade PnL: {pnl_pct:+.2f}%")
+                    stats["win_rate_pct"] = (
+                        stats["winning_trades"] / stats["total_trades"]
+                    ) * 100
+
+                    # Record Closed Trade
+                    trade_record = {
+                        "id": len(trade_history) + 1,
+                        "symbol": pos_symbol,
+                        "entry_price": entry_p,
+                        "exit_price": check_price,
+                        "entry_time": current_position["entry_time"],
+                        "exit_time": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "exit_reason": exit_reason,
+                        "pnl_usdt": round(realized_pnl_usdt, 4),
+                        "pnl_pct": round(realized_pnl_pct, 2),
+                    }
+                    trade_history.append(trade_record)
+
+                    logger.info("=" * 60)
+                    logger.info(f"🔴 [PAPER TRADE CLOSED] {pos_symbol} | Reason: {exit_reason}")
+                    logger.info(f"   Exit Price  : ${check_price:,.4f}")
+                    logger.info(f"   Realized PnL: {realized_pnl_pct:+.2f}% (${realized_pnl_usdt:+.4f} USDT)")
+                    logger.info(f"   Total Balance: ${stats['current_balance']:,.2f} USDT (WinRate: {stats['win_rate_pct']:.1f}%)")
+                    logger.info("=" * 60)
+
+                    # Reset State Posisi
                     current_position = None
 
         except Exception as e:
             logger.error(f"❌ Error in Execution Loop: {e}")
 
-        # Polling Interval (misal: Cek tiap 30 detik)
+        # Polling Interval (Cek harga OKX setiap 30 detik)
         await asyncio.sleep(30)
 
 
 @app.on_event("startup")
 async def startup_event():
-    # Jalankan background loop asyncio bersamaan dengan Uvicorn Webserver
     asyncio.create_task(execution_loop())
 
 
 if __name__ == "__main__":
     import uvicorn
-
-    uvicorn.run("main:app", host="0.0.0.0", port=Config.PORT, reload=False)
+    uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=False)
