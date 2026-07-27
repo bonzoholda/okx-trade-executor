@@ -5,6 +5,8 @@ from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 import pandas as pd
 import numpy as np
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 import os
 
 # Setup Logging
@@ -45,6 +47,7 @@ stats = {
     "total_pnl_usdt": 0.0,
     "win_rate_pct": 0.0,
 }
+
 
 
 # --- SCHEMA PAYLOAD WEBHOOK ---
@@ -125,6 +128,18 @@ async def get_performance_stats():
         "active_strategy": active_strategy,
         "recent_trades": trade_history[-10:],  # 10 transaksi terakhir
     }
+
+# Mount folder static jika ada
+if os.path.exists("static"):
+    app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/dashboard")
+async def serve_dashboard():
+    """Melayani halaman utama UI/UX Terminal"""
+    if os.path.exists("static/index.html"):
+        return FileResponse("static/index.html")
+    return {"error": "Dashboard UI file not found."}
+
 
 
 # --- BACKGROUND EXECUTION LOOP ---
