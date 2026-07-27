@@ -244,7 +244,7 @@ async def execution_loop():
             direction = active_strategy["direction"]
             period = active_strategy["rsi_period"]
 
-            ohlcv = await exchange.fetch_ohlcv(symbol, timeframe="1h", limit=100)
+            ohlcv = await exchange.fetch_ohlcv(symbol, timeframe="15m", limit=100)
             df = pd.DataFrame(
                 ohlcv,
                 columns=["timestamp", "open", "high", "low", "close", "volume"],
