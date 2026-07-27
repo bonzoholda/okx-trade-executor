@@ -23,11 +23,13 @@ PORT = int(os.getenv("PORT", "8080"))
 active_strategy = {
     "symbol": "BTC/USDT",
     "direction": "LONG",
+    "leverage": LEVERAGE,
     "rsi_period": 14,
     "rsi_lower": 30.0,
     "rsi_upper": 70.0,
     "stop_loss_pct": 0.02,
     "take_profit_pct": 0.05,
+    "current_rsi": 50.0,  # Menyediakan fallback nilai RSI live untuk UI
     "is_active": True,
 }
 
@@ -77,6 +79,7 @@ async def update_strategy(
         {
             "symbol": payload.symbol,
             "direction": payload.direction.upper(),
+            "leverage": LEVERAGE,
             "rsi_period": payload.rsi_period,
             "rsi_lower": payload.rsi_lower,
             "rsi_upper": payload.rsi_upper,
@@ -128,7 +131,7 @@ async def get_performance_stats():
 
 
 async def execution_loop():
-    global current_position, stats, trade_history
+    global current_position, stats, trade_history, active_strategy
     logger.info(
         f"⚡ Futures Execution Loop Started. Leverage: {LEVERAGE}x | Monitoring OKX..."
     )
@@ -152,6 +155,9 @@ async def execution_loop():
             )
             current_price = float(df["close"].iloc[-1])
             current_rsi = calculate_rsi(df["close"], period)
+
+            # Update RSI live ke global state agar terbaca oleh dashboard /stats
+            active_strategy["current_rsi"] = current_rsi
 
             # 1. BELUM PUNYA POSISI -> CEK ENTRY
             if current_position is None:
@@ -183,6 +189,7 @@ async def execution_loop():
                         "leverage": LEVERAGE,
                         "entry_price": current_price,
                         "current_price": current_price,
+                        "current_rsi": current_rsi,
                         "amount": amount,
                         "margin_usdt": TRADE_AMOUNT_USDT,
                         "stop_loss_price": sl_price,
@@ -217,6 +224,7 @@ async def execution_loop():
                 floating_pnl_usdt = TRADE_AMOUNT_USDT * (raw_price_change_pct * LEVERAGE)
 
                 current_position["current_price"] = current_price
+                current_position["current_rsi"] = current_rsi  # Update live RSI posisi aktif
                 current_position["floating_pnl_pct"] = floating_pnl_pct
                 current_position["floating_pnl_usdt"] = floating_pnl_usdt
 
