@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import asyncpg
 import ccxt.async_support as ccxt
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import FileResponse
@@ -15,10 +16,15 @@ logger = logging.getLogger("OKX-Futures-Executor")
 
 app = FastAPI(title="OKX Futures Paper Trading Executor Engine")
 
+# --- CONFIGURATION ---
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "my_secret_token_123")
 TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "20.0"))
 LEVERAGE = int(os.getenv("LEVERAGE", "3"))
 PORT = int(os.getenv("PORT", "8080"))
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+
+# PostgreSQL Connection Pool
+db_pool = None
 
 active_strategy = {
     "symbol": "BTC/USDT",
@@ -29,21 +35,11 @@ active_strategy = {
     "rsi_upper": 70.0,
     "stop_loss_pct": 0.02,
     "take_profit_pct": 0.05,
-    "current_rsi": 50.0,  # Menyediakan fallback nilai RSI live untuk UI
+    "current_rsi": 50.0,
     "is_active": True,
 }
 
 current_position = None
-trade_history = []
-stats = {
-    "initial_balance": 1000.0,
-    "current_balance": 1000.0,
-    "total_trades": 0,
-    "winning_trades": 0,
-    "losing_trades": 0,
-    "total_pnl_usdt": 0.0,
-    "win_rate_pct": 0.0,
-}
 
 
 class StrategyPayload(BaseModel):
@@ -54,6 +50,105 @@ class StrategyPayload(BaseModel):
     rsi_upper: float
     stop_loss_pct: float
     take_profit_pct: float
+
+
+# --- DATABASE HELPER FUNCTIONS ---
+async def init_db():
+    global db_pool
+    if not DATABASE_URL:
+        logger.warning("⚠️ DATABASE_URL not set! Running in-memory mode without persistence.")
+        return
+
+    try:
+        # Railway PostgreSQL connection string fix if using postgres://
+        pg_url = DATABASE_URL.replace("postgres://", "postgresql://")
+        db_pool = await asyncpg.create_pool(pg_url, min_size=1, max_size=10)
+        
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS trades (
+                    id SERIAL PRIMARY KEY,
+                    symbol VARCHAR(20) NOT NULL,
+                    direction VARCHAR(10) NOT NULL,
+                    leverage VARCHAR(10) NOT NULL,
+                    entry_price NUMERIC(18, 6) NOT NULL,
+                    exit_price NUMERIC(18, 6) NOT NULL,
+                    entry_time VARCHAR(30) NOT NULL,
+                    exit_time VARCHAR(30) NOT NULL,
+                    exit_reason VARCHAR(100) NOT NULL,
+                    pnl_usdt NUMERIC(18, 4) NOT NULL,
+                    pnl_pct NUMERIC(10, 2) NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+        logger.info("🐘 PostgreSQL Database Connected & Table 'trades' Verified!")
+    except Exception as e:
+        logger.error(f"❌ Database Connection Error: {e}")
+
+
+async def save_closed_trade_to_db(trade_record: dict):
+    if not db_pool:
+        return
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO trades (symbol, direction, leverage, entry_price, exit_price, entry_time, exit_time, exit_reason, pnl_usdt, pnl_pct)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            """, 
+            trade_record['symbol'], trade_record['direction'], trade_record['leverage'],
+            trade_record['entry_price'], trade_record['exit_price'], trade_record['entry_time'],
+            trade_record['exit_time'], trade_record['exit_reason'], trade_record['pnl_usdt'],
+            trade_record['pnl_pct']
+            )
+            logger.info(f"💾 Trade #{trade_record.get('id', '')} saved permanently to PostgreSQL!")
+    except Exception as e:
+        logger.error(f"❌ Failed to save trade to DB: {e}")
+
+
+async def fetch_stats_from_db():
+    if not db_pool:
+        return {
+            "initial_balance": 1000.0, "current_balance": 1000.0,
+            "total_trades": 0, "winning_trades": 0, "losing_trades": 0,
+            "total_pnl_usdt": 0.0, "win_rate_pct": 0.0
+        }, []
+
+    try:
+        async with db_pool.acquire() as conn:
+            summary_row = await conn.fetchrow("""
+                SELECT 
+                    COUNT(*) as total_trades,
+                    COALESCE(SUM(CASE WHEN pnl_usdt >= 0 THEN 1 ELSE 0 END), 0) as winning_trades,
+                    COALESCE(SUM(CASE WHEN pnl_usdt < 0 THEN 1 ELSE 0 END), 0) as losing_trades,
+                    COALESCE(SUM(pnl_usdt), 0) as total_pnl
+                FROM trades
+            """)
+
+            recent_trades_rows = await conn.fetch("""
+                SELECT id, symbol, direction, leverage, entry_price, exit_price, exit_reason, pnl_usdt, pnl_pct, exit_time
+                FROM trades ORDER BY id ASC LIMIT 50
+            """)
+
+            total_trades = summary_row['total_trades'] or 0
+            winning_trades = summary_row['winning_trades'] or 0
+            losing_trades = summary_row['losing_trades'] or 0
+            total_pnl = float(summary_row['total_pnl'] or 0.0)
+            win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0.0
+
+            recent_trades = [dict(r) for r in recent_trades_rows]
+
+            return {
+                "initial_balance": 1000.0,
+                "current_balance": 1000.0 + total_pnl,
+                "total_trades": total_trades,
+                "winning_trades": winning_trades,
+                "losing_trades": losing_trades,
+                "total_pnl_usdt": round(total_pnl, 4),
+                "win_rate_pct": round(win_rate, 1)
+            }, recent_trades
+    except Exception as e:
+        logger.error(f"❌ Failed to fetch stats from DB: {e}")
+        return {"initial_balance": 1000.0, "current_balance": 1000.0, "total_trades": 0, "winning_trades": 0, "losing_trades": 0, "total_pnl_usdt": 0.0, "win_rate_pct": 0.0}, []
 
 
 def calculate_rsi(series: pd.Series, period: int) -> float:
@@ -123,15 +218,16 @@ async def get_active_position():
 
 @app.get("/stats")
 async def get_performance_stats():
+    summary_stats, recent_trades = await fetch_stats_from_db()
     return {
-        "summary": stats,
+        "summary": summary_stats,
         "active_strategy": active_strategy,
-        "recent_trades": trade_history[-10:],
+        "recent_trades": recent_trades,
     }
 
 
 async def execution_loop():
-    global current_position, stats, trade_history, active_strategy
+    global current_position, active_strategy
     logger.info(
         f"⚡ Futures Execution Loop Started. Leverage: {LEVERAGE}x | Monitoring OKX..."
     )
@@ -156,7 +252,6 @@ async def execution_loop():
             current_price = float(df["close"].iloc[-1])
             current_rsi = calculate_rsi(df["close"], period)
 
-            # Update RSI live ke global state agar terbaca oleh dashboard /stats
             active_strategy["current_rsi"] = current_rsi
 
             # 1. BELUM PUNYA POSISI -> CEK ENTRY
@@ -179,7 +274,7 @@ async def execution_loop():
                     if direction == "LONG":
                         sl_price = current_price * (1 - active_strategy["stop_loss_pct"])
                         tp_price = current_price * (1 + active_strategy["take_profit_pct"])
-                    else:  # SHORT
+                    else:
                         sl_price = current_price * (1 + active_strategy["stop_loss_pct"])
                         tp_price = current_price * (1 - active_strategy["take_profit_pct"])
 
@@ -214,17 +309,16 @@ async def execution_loop():
                 sl_p = current_position["stop_loss_price"]
                 tp_p = current_position["take_profit_price"]
 
-                # Hitung PnL Berdasarkan Direction & Leverage
                 if pos_direction == "LONG":
                     raw_price_change_pct = (current_price - entry_p) / entry_p
-                else:  # SHORT
+                else:
                     raw_price_change_pct = (entry_p - current_price) / entry_p
 
                 floating_pnl_pct = raw_price_change_pct * LEVERAGE * 100
                 floating_pnl_usdt = TRADE_AMOUNT_USDT * (raw_price_change_pct * LEVERAGE)
 
                 current_position["current_price"] = current_price
-                current_position["current_rsi"] = current_rsi  # Update live RSI posisi aktif
+                current_position["current_rsi"] = current_rsi
                 current_position["floating_pnl_pct"] = floating_pnl_pct
                 current_position["floating_pnl_usdt"] = floating_pnl_usdt
 
@@ -235,7 +329,6 @@ async def execution_loop():
                 should_close = False
                 exit_reason = ""
 
-                # Sinyal Exit
                 if pos_direction == "LONG":
                     if current_price <= sl_p:
                         should_close = True; exit_reason = "STOP LOSS HIT 🔴"
@@ -243,7 +336,7 @@ async def execution_loop():
                         should_close = True; exit_reason = "TAKE PROFIT HIT 🟢"
                     elif current_rsi > active_strategy["rsi_upper"]:
                         should_close = True; exit_reason = f"RSI EXIT SIGNAL ({current_rsi:.1f}) 🟡"
-                else:  # SHORT
+                else:
                     if current_price >= sl_p:
                         should_close = True; exit_reason = "STOP LOSS HIT 🔴"
                     elif current_price <= tp_p:
@@ -252,19 +345,7 @@ async def execution_loop():
                         should_close = True; exit_reason = f"RSI EXIT SIGNAL ({current_rsi:.1f}) 🟡"
 
                 if should_close:
-                    stats["total_trades"] += 1
-                    stats["total_pnl_usdt"] += floating_pnl_usdt
-                    stats["current_balance"] += floating_pnl_usdt
-
-                    if floating_pnl_usdt >= 0:
-                        stats["winning_trades"] += 1
-                    else:
-                        stats["losing_trades"] += 1
-
-                    stats["win_rate_pct"] = (stats["winning_trades"] / stats["total_trades"]) * 100
-
                     trade_record = {
-                        "id": len(trade_history) + 1,
                         "symbol": symbol,
                         "direction": pos_direction,
                         "leverage": f"{LEVERAGE}x",
@@ -276,13 +357,14 @@ async def execution_loop():
                         "pnl_usdt": round(floating_pnl_usdt, 4),
                         "pnl_pct": round(floating_pnl_pct, 2),
                     }
-                    trade_history.append(trade_record)
+
+                    # Persist Record to PostgreSQL Database
+                    await save_closed_trade_to_db(trade_record)
 
                     logger.info("=" * 60)
                     logger.info(f"🔴 [FUTURES CLOSED] {symbol} {pos_direction} | Reason: {exit_reason}")
                     logger.info(f"   Exit Price  : ${current_price:,.4f}")
                     logger.info(f"   Realized PnL: {floating_pnl_pct:+.2f}% (${floating_pnl_usdt:+.4f} USDT)")
-                    logger.info(f"   New Balance : ${stats['current_balance']:,.2f} USDT")
                     logger.info("=" * 60)
 
                     current_position = None
@@ -295,6 +377,7 @@ async def execution_loop():
 
 @app.on_event("startup")
 async def startup_event():
+    await init_db()
     asyncio.create_task(execution_loop())
 
 
