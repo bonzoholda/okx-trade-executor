@@ -334,14 +334,14 @@ async def execution_loop():
                         should_close = True; exit_reason = "STOP LOSS HIT 🔴"
                     elif current_price >= tp_p:
                         should_close = True; exit_reason = "TAKE PROFIT HIT 🟢"
-                    elif current_rsi > active_strategy["rsi_upper"]:
+                    elif current_rsi > active_strategy["rsi_upper"] and floating_pnl_pct >= 1.5:
                         should_close = True; exit_reason = f"RSI EXIT SIGNAL ({current_rsi:.1f}) 🟡"
                 else:
                     if current_price >= sl_p:
                         should_close = True; exit_reason = "STOP LOSS HIT 🔴"
                     elif current_price <= tp_p:
                         should_close = True; exit_reason = "TAKE PROFIT HIT 🟢"
-                    elif current_rsi < active_strategy["rsi_lower"]:
+                    elif current_rsi < active_strategy["rsi_lower"] and floating_pnl_pct >= 1.5:
                         should_close = True; exit_reason = f"RSI EXIT SIGNAL ({current_rsi:.1f}) 🟡"
 
                 if should_close:
