@@ -23,6 +23,11 @@ LEVERAGE = int(os.getenv("LEVERAGE", "3"))
 PORT = int(os.getenv("PORT", "8080"))
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
+# --- RISK PERFORMANCE PARAMETERS ---
+MIN_RSI_EXIT_PNL_PCT = 2.5    # Minimum Floating PnL (%) sebelum RSI Exit diizinkan terpicu
+BREAKEVEN_TRIGGER_PNL_PCT = 1.5 # Floating PnL (%) untuk menggeser Stop Loss ke Entry Price (Break Even)
+TRAILING_STOP_DIST_PCT = 1.0   # Jarak Trailing Stop (%) membuntut harga tertinggi saat profit > 2.5%
+
 # PostgreSQL Connection Pool
 db_pool = None
 
@@ -60,7 +65,6 @@ async def init_db():
         return
 
     try:
-        # Railway PostgreSQL connection string fix if using postgres://
         pg_url = DATABASE_URL.replace("postgres://", "postgresql://")
         db_pool = await asyncpg.create_pool(pg_url, min_size=1, max_size=10)
         
@@ -100,7 +104,7 @@ async def save_closed_trade_to_db(trade_record: dict):
             trade_record['exit_time'], trade_record['exit_reason'], trade_record['pnl_usdt'],
             trade_record['pnl_pct']
             )
-            logger.info(f"💾 Trade #{trade_record.get('id', '')} saved permanently to PostgreSQL!")
+            logger.info(f"💾 Trade saved permanently to PostgreSQL!")
     except Exception as e:
         logger.error(f"❌ Failed to save trade to DB: {e}")
 
@@ -229,7 +233,7 @@ async def get_performance_stats():
 async def execution_loop():
     global current_position, active_strategy
     logger.info(
-        f"⚡ Futures Execution Loop Started. Leverage: {LEVERAGE}x | Monitoring OKX..."
+        f"⚡ Futures Execution Loop Started. Leverage: {LEVERAGE}x | Timeframe: 15m | Monitoring OKX..."
     )
 
     exchange = ccxt.okx({"enableRateLimit": True})
@@ -284,13 +288,16 @@ async def execution_loop():
                         "leverage": LEVERAGE,
                         "entry_price": current_price,
                         "current_price": current_price,
+                        "best_price": current_price,  # Melacak harga terekstrem untuk Trailing Stop
                         "current_rsi": current_rsi,
                         "amount": amount,
                         "margin_usdt": TRADE_AMOUNT_USDT,
+                        "initial_stop_loss": sl_price,
                         "stop_loss_price": sl_price,
                         "take_profit_price": tp_price,
                         "floating_pnl_pct": 0.0,
                         "floating_pnl_usdt": 0.0,
+                        "is_breakeven_active": False,
                         "entry_time": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
                     }
 
@@ -298,21 +305,26 @@ async def execution_loop():
                     logger.info(f"🟢 [FUTURES {direction}] ENTRY EXECUTED for [{symbol}]")
                     logger.info(f"   Entry Price  : ${current_price:,.4f}")
                     logger.info(f"   Margin / Leverage: ${TRADE_AMOUNT_USDT} USDT @ {LEVERAGE}x")
-                    logger.info(f"   Stop Loss Target : ${sl_price:,.4f}")
+                    logger.info(f"   Initial Stop Loss: ${sl_price:,.4f}")
                     logger.info(f"   Take Profit Target: ${tp_price:,.4f}")
                     logger.info("=" * 60)
 
-            # 2. SEDANG PUNYA POSISI -> CEK EXIT
+            # 2. SEDANG PUNYA POSISI -> CEK TRAILING STOP & EXIT SIGNALS
             else:
                 pos_direction = current_position["direction"]
                 entry_p = current_position["entry_price"]
                 sl_p = current_position["stop_loss_price"]
                 tp_p = current_position["take_profit_price"]
 
+                # Hitung PnL Berdasarkan Direction & Leverage
                 if pos_direction == "LONG":
                     raw_price_change_pct = (current_price - entry_p) / entry_p
-                else:
+                    if current_price > current_position["best_price"]:
+                        current_position["best_price"] = current_price
+                else:  # SHORT
                     raw_price_change_pct = (entry_p - current_price) / entry_p
+                    if current_price < current_position["best_price"]:
+                        current_position["best_price"] = current_price
 
                 floating_pnl_pct = raw_price_change_pct * LEVERAGE * 100
                 floating_pnl_usdt = TRADE_AMOUNT_USDT * (raw_price_change_pct * LEVERAGE)
@@ -322,28 +334,64 @@ async def execution_loop():
                 current_position["floating_pnl_pct"] = floating_pnl_pct
                 current_position["floating_pnl_usdt"] = floating_pnl_usdt
 
+                # --- 🛡️ LOGIKA TRAILING STOP & BREAK-EVEN PROTECTOR ---
+                best_p = current_position["best_price"]
+
+                # A. Mengaktifkan Break-Even (Risk-Free) jika Profit >= +1.5%
+                if floating_pnl_pct >= BREAKEVEN_TRIGGER_PNL_PCT and not current_position["is_breakeven_active"]:
+                    current_position["stop_loss_price"] = entry_p
+                    current_position["is_breakeven_active"] = True
+                    sl_p = entry_p
+                    logger.info(f"🛡️ [BREAK-EVEN ACTIVATED] Stop Loss moved to Entry Price (${entry_p:,.4f}) to lock risk-free trade.")
+
+                # B. Dynamic Trailing Stop jika Profit >= +2.5%
+                if floating_pnl_pct >= MIN_RSI_EXIT_PNL_PCT:
+                    if pos_direction == "LONG":
+                        new_trailing_sl = best_p * (1 - (TRAILING_STOP_DIST_PCT / 100 / LEVERAGE))
+                        if new_trailing_sl > sl_p:
+                            current_position["stop_loss_price"] = new_trailing_sl
+                            sl_p = new_trailing_sl
+                            logger.info(f"📈 [TRAILING STOP UPDATED] New Long SL: ${sl_p:,.4f}")
+                    else:  # SHORT
+                        new_trailing_sl = best_p * (1 + (TRAILING_STOP_DIST_PCT / 100 / LEVERAGE))
+                        if new_trailing_sl < sl_p:
+                            current_position["stop_loss_price"] = new_trailing_sl
+                            sl_p = new_trailing_sl
+                            logger.info(f"📉 [TRAILING STOP UPDATED] New Short SL: ${sl_p:,.4f}")
+
                 logger.info(
                     f"📈 [{symbol} {pos_direction} {LEVERAGE}x ACTIVE] Price: ${current_price:,.4f} | Entry: ${entry_p:,.4f} | PnL: {floating_pnl_pct:+.2f}% (${floating_pnl_usdt:+.2f} USDT)"
                 )
 
+                # --- 🔴 CEK TRIGGER EXIT ---
                 should_close = False
                 exit_reason = ""
 
                 if pos_direction == "LONG":
                     if current_price <= sl_p:
-                        should_close = True; exit_reason = "STOP LOSS HIT 🔴"
+                        should_close = True
+                        exit_reason = "TRAILING / STOP LOSS HIT 🔴" if current_position["is_breakeven_active"] else "STOP LOSS HIT 🔴"
                     elif current_price >= tp_p:
-                        should_close = True; exit_reason = "TAKE PROFIT HIT 🟢"
-                    elif current_rsi > active_strategy["rsi_upper"] and floating_pnl_pct >= 1.5:
-                        should_close = True; exit_reason = f"RSI EXIT SIGNAL ({current_rsi:.1f}) 🟡"
-                else:
+                        should_close = True
+                        exit_reason = "TAKE PROFIT HIT 🟢"
+                    # 🔥 RSI Exit HANYA BOLEH aktif jika PnL sudah >= MIN_RSI_EXIT_PNL_PCT (+2.5%)
+                    elif current_rsi > active_strategy["rsi_upper"] and floating_pnl_pct >= MIN_RSI_EXIT_PNL_PCT:
+                        should_close = True
+                        exit_reason = f"RSI EXIT SIGNAL ({current_rsi:.1f}) @ PnL {floating_pnl_pct:+.2f}% 🟡"
+                
+                else:  # SHORT
                     if current_price >= sl_p:
-                        should_close = True; exit_reason = "STOP LOSS HIT 🔴"
+                        should_close = True
+                        exit_reason = "TRAILING / STOP LOSS HIT 🔴" if current_position["is_breakeven_active"] else "STOP LOSS HIT 🔴"
                     elif current_price <= tp_p:
-                        should_close = True; exit_reason = "TAKE PROFIT HIT 🟢"
-                    elif current_rsi < active_strategy["rsi_lower"] and floating_pnl_pct >= 1.5:
-                        should_close = True; exit_reason = f"RSI EXIT SIGNAL ({current_rsi:.1f}) 🟡"
+                        should_close = True
+                        exit_reason = "TAKE PROFIT HIT 🟢"
+                    # 🔥 RSI Exit HANYA BOLEH aktif jika PnL sudah >= MIN_RSI_EXIT_PNL_PCT (+2.5%)
+                    elif current_rsi < active_strategy["rsi_lower"] and floating_pnl_pct >= MIN_RSI_EXIT_PNL_PCT:
+                        should_close = True
+                        exit_reason = f"RSI EXIT SIGNAL ({current_rsi:.1f}) @ PnL {floating_pnl_pct:+.2f}% 🟡"
 
+                # --- 💾 EXECUTE CLOSE & PERSIST TO DB ---
                 if should_close:
                     trade_record = {
                         "symbol": symbol,
@@ -358,7 +406,6 @@ async def execution_loop():
                         "pnl_pct": round(floating_pnl_pct, 2),
                     }
 
-                    # Persist Record to PostgreSQL Database
                     await save_closed_trade_to_db(trade_record)
 
                     logger.info("=" * 60)
