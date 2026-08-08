@@ -24,9 +24,9 @@ PORT = int(os.getenv("PORT", "8080"))
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 # --- RISK PERFORMANCE PARAMETERS ---
-MIN_RSI_EXIT_PNL_PCT = 2.5    # Minimum Floating PnL (%) sebelum RSI Exit diizinkan terpicu
-BREAKEVEN_TRIGGER_PNL_PCT = 1.5 # Floating PnL (%) untuk menggeser Stop Loss ke Entry Price (Break Even)
-TRAILING_STOP_DIST_PCT = 1.0   # Jarak Trailing Stop (%) membuntut harga tertinggi saat profit > 2.5%
+MIN_RSI_EXIT_PNL_PCT = 2.5    # Minimum Floating PnL (%) sebelum RSI Exit diizinkan
+BREAKEVEN_TRIGGER_PNL_PCT = 1.5 # Floating PnL (%) untuk menggeser SL ke Entry Price
+TRAILING_STOP_DIST_PCT = 1.0   # Jarak Trailing Stop (%)
 
 # PostgreSQL Connection Pool
 db_pool = None
@@ -104,7 +104,7 @@ async def save_closed_trade_to_db(trade_record: dict):
             trade_record['exit_time'], trade_record['exit_reason'], trade_record['pnl_usdt'],
             trade_record['pnl_pct']
             )
-            logger.info(f"💾 Trade saved permanently to PostgreSQL!")
+            logger.info("💾 Trade saved permanently to PostgreSQL!")
     except Exception as e:
         logger.error(f"❌ Failed to save trade to DB: {e}")
 
@@ -172,6 +172,17 @@ async def update_strategy(
         raise HTTPException(
             status_code=401, detail="Unauthorized Webhook Secret"
         )
+
+    # 🛡️ GUARDRAIL 1: Cegah Hot-Reload jika sedang ada Posisi Aktif
+    if current_position is not None:
+        logger.warning(
+            f"⚠️ [Hot-Reload Rejected] Active position on [{current_position['symbol']}] is still running. "
+            f"Ignoring strategy update for [{payload.symbol}] until position closes."
+        )
+        return {
+            "status": "ignored",
+            "message": f"Active position on {current_position['symbol']} running. Strategy update deferred.",
+        }
 
     global active_strategy
     active_strategy.update(
@@ -244,11 +255,12 @@ async def execution_loop():
                 await asyncio.sleep(10)
                 continue
 
-            symbol = active_strategy["symbol"]
-            direction = active_strategy["direction"]
+            # 🛡️ GUARDRAIL 2: Selalu gunakan symbol dari posisi aktif jika ada posisi
+            target_symbol = current_position["symbol"] if current_position is not None else active_strategy["symbol"]
+            direction = current_position["direction"] if current_position is not None else active_strategy["direction"]
             period = active_strategy["rsi_period"]
 
-            ohlcv = await exchange.fetch_ohlcv(symbol, timeframe="15m", limit=100)
+            ohlcv = await exchange.fetch_ohlcv(target_symbol, timeframe="15m", limit=100)
             df = pd.DataFrame(
                 ohlcv,
                 columns=["timestamp", "open", "high", "low", "close", "volume"],
@@ -268,7 +280,7 @@ async def execution_loop():
                     is_entry_triggered = True
 
                 logger.info(
-                    f"👀 [{symbol} {direction} {LEVERAGE}x] Price: ${current_price:,.4f} | RSI({period}): {current_rsi:.2f}"
+                    f"👀 [{target_symbol} {direction} {LEVERAGE}x] Price: ${current_price:,.4f} | RSI({period}): {current_rsi:.2f}"
                 )
 
                 if is_entry_triggered:
@@ -282,13 +294,14 @@ async def execution_loop():
                         sl_price = current_price * (1 + active_strategy["stop_loss_pct"])
                         tp_price = current_price * (1 - active_strategy["take_profit_pct"])
 
+                    # Mengunci Symbol secara independen pada objek posisi
                     current_position = {
-                        "symbol": symbol,
+                        "symbol": target_symbol,
                         "direction": direction,
                         "leverage": LEVERAGE,
                         "entry_price": current_price,
                         "current_price": current_price,
-                        "best_price": current_price,  # Melacak harga terekstrem untuk Trailing Stop
+                        "best_price": current_price,
                         "current_rsi": current_rsi,
                         "amount": amount,
                         "margin_usdt": TRADE_AMOUNT_USDT,
@@ -302,7 +315,7 @@ async def execution_loop():
                     }
 
                     logger.info("=" * 60)
-                    logger.info(f"🟢 [FUTURES {direction}] ENTRY EXECUTED for [{symbol}]")
+                    logger.info(f"🟢 [FUTURES {direction}] ENTRY EXECUTED for [{target_symbol}]")
                     logger.info(f"   Entry Price  : ${current_price:,.4f}")
                     logger.info(f"   Margin / Leverage: ${TRADE_AMOUNT_USDT} USDT @ {LEVERAGE}x")
                     logger.info(f"   Initial Stop Loss: ${sl_price:,.4f}")
@@ -312,9 +325,20 @@ async def execution_loop():
             # 2. SEDANG PUNYA POSISI -> CEK TRAILING STOP & EXIT SIGNALS
             else:
                 pos_direction = current_position["direction"]
+                pos_symbol = current_position["symbol"]
                 entry_p = current_position["entry_price"]
                 sl_p = current_position["stop_loss_price"]
                 tp_p = current_position["take_profit_price"]
+
+                # 🛡️ GUARDRAIL 3: Price Sanity Check (Cegah lompatan harga anomali > 50%)
+                price_ratio = current_price / entry_p
+                if price_ratio > 1.5 or price_ratio < 0.5:
+                    logger.error(
+                        f"🚨 [SANITY CHECK FAILED] Anomaly price detected for {pos_symbol}! "
+                        f"Entry: ${entry_p:,.4f} | Live: ${current_price:,.4f}. Skipping iteration."
+                    )
+                    await asyncio.sleep(10)
+                    continue
 
                 # Hitung PnL Berdasarkan Direction & Leverage
                 if pos_direction == "LONG":
@@ -334,36 +358,34 @@ async def execution_loop():
                 current_position["floating_pnl_pct"] = floating_pnl_pct
                 current_position["floating_pnl_usdt"] = floating_pnl_usdt
 
-                # --- 🛡️ LOGIKA TRAILING STOP & BREAK-EVEN PROTECTOR ---
+                # LOGIKA TRAILING STOP & BREAK-EVEN PROTECTOR
                 best_p = current_position["best_price"]
 
-                # A. Mengaktifkan Break-Even (Risk-Free) jika Profit >= +1.5%
                 if floating_pnl_pct >= BREAKEVEN_TRIGGER_PNL_PCT and not current_position["is_breakeven_active"]:
                     current_position["stop_loss_price"] = entry_p
                     current_position["is_breakeven_active"] = True
                     sl_p = entry_p
-                    logger.info(f"🛡️ [BREAK-EVEN ACTIVATED] Stop Loss moved to Entry Price (${entry_p:,.4f}) to lock risk-free trade.")
+                    logger.info(f"🛡️ [BREAK-EVEN ACTIVATED] Stop Loss moved to Entry Price (${entry_p:,.4f}) for [{pos_symbol}].")
 
-                # B. Dynamic Trailing Stop jika Profit >= +2.5%
                 if floating_pnl_pct >= MIN_RSI_EXIT_PNL_PCT:
                     if pos_direction == "LONG":
                         new_trailing_sl = best_p * (1 - (TRAILING_STOP_DIST_PCT / 100 / LEVERAGE))
                         if new_trailing_sl > sl_p:
                             current_position["stop_loss_price"] = new_trailing_sl
                             sl_p = new_trailing_sl
-                            logger.info(f"📈 [TRAILING STOP UPDATED] New Long SL: ${sl_p:,.4f}")
+                            logger.info(f"📈 [TRAILING STOP UPDATED] [{pos_symbol}] New Long SL: ${sl_p:,.4f}")
                     else:  # SHORT
                         new_trailing_sl = best_p * (1 + (TRAILING_STOP_DIST_PCT / 100 / LEVERAGE))
                         if new_trailing_sl < sl_p:
                             current_position["stop_loss_price"] = new_trailing_sl
                             sl_p = new_trailing_sl
-                            logger.info(f"📉 [TRAILING STOP UPDATED] New Short SL: ${sl_p:,.4f}")
+                            logger.info(f"📉 [TRAILING STOP UPDATED] [{pos_symbol}] New Short SL: ${sl_p:,.4f}")
 
                 logger.info(
-                    f"📈 [{symbol} {pos_direction} {LEVERAGE}x ACTIVE] Price: ${current_price:,.4f} | Entry: ${entry_p:,.4f} | PnL: {floating_pnl_pct:+.2f}% (${floating_pnl_usdt:+.2f} USDT)"
+                    f"📈 [{pos_symbol} {pos_direction} {LEVERAGE}x ACTIVE] Price: ${current_price:,.4f} | Entry: ${entry_p:,.4f} | PnL: {floating_pnl_pct:+.2f}% (${floating_pnl_usdt:+.2f} USDT)"
                 )
 
-                # --- 🔴 CEK TRIGGER EXIT ---
+                # CEK TRIGGER EXIT
                 should_close = False
                 exit_reason = ""
 
@@ -374,7 +396,6 @@ async def execution_loop():
                     elif current_price >= tp_p:
                         should_close = True
                         exit_reason = "TAKE PROFIT HIT 🟢"
-                    # 🔥 RSI Exit HANYA BOLEH aktif jika PnL sudah >= MIN_RSI_EXIT_PNL_PCT (+2.5%)
                     elif current_rsi > active_strategy["rsi_upper"] and floating_pnl_pct >= MIN_RSI_EXIT_PNL_PCT:
                         should_close = True
                         exit_reason = f"RSI EXIT SIGNAL ({current_rsi:.1f}) @ PnL {floating_pnl_pct:+.2f}% 🟡"
@@ -386,15 +407,14 @@ async def execution_loop():
                     elif current_price <= tp_p:
                         should_close = True
                         exit_reason = "TAKE PROFIT HIT 🟢"
-                    # 🔥 RSI Exit HANYA BOLEH aktif jika PnL sudah >= MIN_RSI_EXIT_PNL_PCT (+2.5%)
                     elif current_rsi < active_strategy["rsi_lower"] and floating_pnl_pct >= MIN_RSI_EXIT_PNL_PCT:
                         should_close = True
                         exit_reason = f"RSI EXIT SIGNAL ({current_rsi:.1f}) @ PnL {floating_pnl_pct:+.2f}% 🟡"
 
-                # --- 💾 EXECUTE CLOSE & PERSIST TO DB ---
+                # EXECUTE CLOSE & PERSIST TO DB
                 if should_close:
                     trade_record = {
-                        "symbol": symbol,
+                        "symbol": pos_symbol,
                         "direction": pos_direction,
                         "leverage": f"{LEVERAGE}x",
                         "entry_price": entry_p,
@@ -409,7 +429,7 @@ async def execution_loop():
                     await save_closed_trade_to_db(trade_record)
 
                     logger.info("=" * 60)
-                    logger.info(f"🔴 [FUTURES CLOSED] {symbol} {pos_direction} | Reason: {exit_reason}")
+                    logger.info(f"🔴 [FUTURES CLOSED] {pos_symbol} {pos_direction} | Reason: {exit_reason}")
                     logger.info(f"   Exit Price  : ${current_price:,.4f}")
                     logger.info(f"   Realized PnL: {floating_pnl_pct:+.2f}% (${floating_pnl_usdt:+.4f} USDT)")
                     logger.info("=" * 60)
