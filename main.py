@@ -24,16 +24,17 @@ MAX_SLOTS = int(os.getenv("MAX_SLOTS", "3"))                      # Maksimal 3 s
 PORT = int(os.getenv("PORT", "8080"))
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
-# --- RISK PERFORMANCE PARAMETERS ---
-MIN_RSI_EXIT_PNL_PCT = 2.5    # Minimum Floating PnL (%) sebelum RSI Exit diizinkan
-BREAKEVEN_TRIGGER_PNL_PCT = 1.5 # Floating PnL (%) untuk menggeser SL ke Entry Price
-TRAILING_STOP_DIST_PCT = 1.0   # Jarak Trailing Stop (%)
+# --- ENHANCED STEP-LOCK & TIME-BASED RISK PARAMETERS ---
+BREAKEVEN_TRIGGER_PNL_PCT = 1.2   # Tier 1: Lock Break-Even (0.0%) at +1.2% PnL
+LOCK_PROFIT_TRIGGER_PNL_PCT = 2.0  # Tier 2: Lock +1.0% Profit at +2.0% PnL
+MIN_RSI_EXIT_PNL_PCT = 2.5        # Tier 3: Enable Dynamic Trailing & RSI Exit
+TRAILING_STOP_DIST_PCT = 1.0      # Trailing Stop Distance (%)
+MAX_HOLDING_HOURS = 12             # Timeout exit for stagnant trades (>12 hrs)
 
 # PostgreSQL Connection Pool
 db_pool = None
 
 # --- MULTI-SLOT IN-MEMORY STATE ---
-# Active Strategies Map -> Format: {"BTC/USDT": strat_dict, "ADA/USDT": strat_dict, ...}
 active_strategies = {
     "BTC/USDT": {
         "symbol": "BTC/USDT",
@@ -49,7 +50,6 @@ active_strategies = {
     }
 }
 
-# Active Positions Dict -> Format: {"BTC/USDT": pos_dict, "ETH/USDT": pos_dict, ...}
 active_positions = {}
 
 
@@ -194,7 +194,7 @@ async def update_strategy(
     }
 
     logger.info(
-        f"🔥 [Hot-Reload] Strategy Updated for [{payload.symbol}] ({payload.direction})! Total Active Strategies: {len(active_strategies)}"
+        f"🔥 [Hot-Reload] Strategy Updated for [{payload.symbol}] ({payload.direction})!"
     )
     return {
         "status": "success",
@@ -220,7 +220,6 @@ async def serve_dashboard():
 
 @app.get("/position")
 async def get_active_positions():
-    """Mengembalikan daftar seluruh posisi aktif (maksimal 3 slot)"""
     return {
         "max_slots": MAX_SLOTS,
         "active_slots_count": len(active_positions),
@@ -241,7 +240,7 @@ async def get_performance_stats():
     }
 
 
-# --- BACKGROUND EXECUTION LOOP (MULTI-SLOT ENGINE) ---
+# --- BACKGROUND EXECUTION LOOP (ENHANCED STEP-LOCK & TIME-BASED EXIT ENGINE) ---
 async def execution_loop():
     global active_positions, active_strategies
     logger.info(
@@ -257,7 +256,7 @@ async def execution_loop():
                 continue
 
             # ------------------------------------------------------------------
-            # 1. EVALUASI POSISI AKTIF (DYNAMIC EXIT & TRAILING STOP MONITORING)
+            # 1. EVALUASI POSISI AKTIF (STEP-LOCK & TIME-BASED STAGNANCY EXIT)
             # ------------------------------------------------------------------
             for symbol, pos in list(active_positions.items()):
                 try:
@@ -292,64 +291,90 @@ async def execution_loop():
                     pos["floating_pnl_pct"] = floating_pnl_pct
                     pos["floating_pnl_usdt"] = floating_pnl_usdt
 
-                    # Update status RSI di active_strategies
                     if symbol in active_strategies:
                         active_strategies[symbol]["current_rsi"] = current_rsi
 
-                    # Trailing Stop & Break-Even Protector
+                    # --- 🛡️ ENHANCED STEP-LOCK TRAILING LOGIC ---
                     best_p = pos["best_price"]
 
+                    # TIER 1: Break-Even Lock at +1.2% PnL (Risk-Free)
                     if floating_pnl_pct >= BREAKEVEN_TRIGGER_PNL_PCT and not pos["is_breakeven_active"]:
                         pos["stop_loss_price"] = entry_p
                         pos["is_breakeven_active"] = True
                         sl_p = entry_p
-                        logger.info(f"🛡️ [BREAK-EVEN ACTIVATED] [{symbol}] SL moved to Entry Price (${entry_p:,.4f}).")
+                        logger.info(f"🛡️ [STEP-LOCK TIER 1] [{symbol}] SL locked to Break-Even (${entry_p:,.4f}).")
 
+                    # TIER 2: Lock Minimum +1.0% Profit at +2.0% PnL
+                    if floating_pnl_pct >= LOCK_PROFIT_TRIGGER_PNL_PCT and not pos.get("is_profit_locked", False):
+                        if pos_direction == "LONG":
+                            locked_sl = entry_p * (1 + (1.0 / 100 / LEVERAGE))
+                        else:  # SHORT
+                            locked_sl = entry_p * (1 - (1.0 / 100 / LEVERAGE))
+
+                        if (pos_direction == "LONG" and locked_sl > sl_p) or (pos_direction == "SHORT" and locked_sl < sl_p):
+                            pos["stop_loss_price"] = locked_sl
+                            sl_p = locked_sl
+                            pos["is_profit_locked"] = True
+                            logger.info(f"💰 [STEP-LOCK TIER 2] [{symbol}] Minimum +1.0% profit locked at SL ${sl_p:,.4f}.")
+
+                    # TIER 3: Dynamic Trailing Stop at >= +2.5% PnL
                     if floating_pnl_pct >= MIN_RSI_EXIT_PNL_PCT:
                         if pos_direction == "LONG":
                             new_trailing_sl = best_p * (1 - (TRAILING_STOP_DIST_PCT / 100 / LEVERAGE))
                             if new_trailing_sl > sl_p:
                                 pos["stop_loss_price"] = new_trailing_sl
                                 sl_p = new_trailing_sl
-                                logger.info(f"📈 [TRAILING STOP UPDATED] [{symbol}] New Long SL: ${sl_p:,.4f}")
+                                logger.info(f"📈 [STEP-LOCK TIER 3] [{symbol}] Dynamic Trailing SL updated: ${sl_p:,.4f}")
                         else:  # SHORT
                             new_trailing_sl = best_p * (1 + (TRAILING_STOP_DIST_PCT / 100 / LEVERAGE))
                             if new_trailing_sl < sl_p:
                                 pos["stop_loss_price"] = new_trailing_sl
                                 sl_p = new_trailing_sl
-                                logger.info(f"📉 [TRAILING STOP UPDATED] [{symbol}] New Short SL: ${sl_p:,.4f}")
+                                logger.info(f"📉 [STEP-LOCK TIER 3] [{symbol}] Dynamic Trailing SL updated: ${sl_p:,.4f}")
+
+                    # --- ⏳ TIME-BASED STAGNANCY CHECK (> 12 Hours) ---
+                    entry_dt = pd.to_datetime(pos["entry_time"])
+                    hours_held = (pd.Timestamp.now() - entry_dt).total_seconds() / 3600.0
 
                     logger.info(
-                        f"📈 [SLOT ACTIVE: {symbol} {pos_direction} {LEVERAGE}x] Price: ${current_price:,.4f} | Entry: ${entry_p:,.4f} | PnL: {floating_pnl_pct:+.2f}% (${floating_pnl_usdt:+.2f} USDT)"
+                        f"📈 [SLOT ACTIVE: {symbol} {pos_direction} {LEVERAGE}x] Price: ${current_price:,.4f} | Entry: ${entry_p:,.4f} | PnL: {floating_pnl_pct:+.2f}% | Duration: {hours_held:.1f}h"
                     )
 
-                    # Cek Trigger Exit
+                    # --- 🔴 CHECK EXIT TRIGGERS ---
                     should_close = False
                     exit_reason = ""
 
                     rsi_upper = strat.get("rsi_upper", 70.0)
                     rsi_lower = strat.get("rsi_lower", 30.0)
 
-                    if pos_direction == "LONG":
-                        if current_price <= sl_p:
-                            should_close = True
-                            exit_reason = "TRAILING / STOP LOSS HIT 🔴" if pos["is_breakeven_active"] else "STOP LOSS HIT 🔴"
-                        elif current_price >= tp_p:
-                            should_close = True
-                            exit_reason = "TAKE PROFIT HIT 🟢"
-                        elif current_rsi > rsi_upper and floating_pnl_pct >= MIN_RSI_EXIT_PNL_PCT:
-                            should_close = True
-                            exit_reason = f"RSI EXIT SIGNAL ({current_rsi:.1f}) @ PnL {floating_pnl_pct:+.2f}% 🟡"
-                    else:  # SHORT
-                        if current_price >= sl_p:
-                            should_close = True
-                            exit_reason = "TRAILING / STOP LOSS HIT 🔴" if pos["is_breakeven_active"] else "STOP LOSS HIT 🔴"
-                        elif current_price <= tp_p:
-                            should_close = True
-                            exit_reason = "TAKE PROFIT HIT 🟢"
-                        elif current_rsi < rsi_lower and floating_pnl_pct >= MIN_RSI_EXIT_PNL_PCT:
-                            should_close = True
-                            exit_reason = f"RSI EXIT SIGNAL ({current_rsi:.1f}) @ PnL {floating_pnl_pct:+.2f}% 🟡"
+                    # 1. Stop Loss & Trailing Hit
+                    if pos_direction == "LONG" and current_price <= sl_p:
+                        should_close = True
+                        exit_reason = "STEP-LOCK / TRAILING SL HIT 🔴" if pos["is_breakeven_active"] else "STOP LOSS HIT 🔴"
+                    elif pos_direction == "SHORT" and current_price >= sl_p:
+                        should_close = True
+                        exit_reason = "STEP-LOCK / TRAILING SL HIT 🔴" if pos["is_breakeven_active"] else "STOP LOSS HIT 🔴"
+
+                    # 2. Take Profit Hit
+                    elif pos_direction == "LONG" and current_price >= tp_p:
+                        should_close = True
+                        exit_reason = "TAKE PROFIT HIT 🟢"
+                    elif pos_direction == "SHORT" and current_price <= tp_p:
+                        should_close = True
+                        exit_reason = "TAKE PROFIT HIT 🟢"
+
+                    # 3. RSI Exit (Only if PnL >= +2.5%)
+                    elif pos_direction == "LONG" and current_rsi > rsi_upper and floating_pnl_pct >= MIN_RSI_EXIT_PNL_PCT:
+                        should_close = True
+                        exit_reason = f"RSI EXIT SIGNAL ({current_rsi:.1f}) @ PnL {floating_pnl_pct:+.2f}% 🟡"
+                    elif pos_direction == "SHORT" and current_rsi < rsi_lower and floating_pnl_pct >= MIN_RSI_EXIT_PNL_PCT:
+                        should_close = True
+                        exit_reason = f"RSI EXIT SIGNAL ({current_rsi:.1f}) @ PnL {floating_pnl_pct:+.2f}% 🟡"
+
+                    # 4. Time-Based Stagnancy Cut (>12 Hrs & PnL between -0.5% and +0.5%)
+                    elif hours_held >= MAX_HOLDING_HOURS and (-0.5 <= floating_pnl_pct <= 0.5):
+                        should_close = True
+                        exit_reason = f"TIME-BASED STAGNANCY CUT ({hours_held:.1f}h Held) ⏱️"
 
                     # Execute Close & Recycle Slot
                     if should_close:
@@ -374,7 +399,6 @@ async def execution_loop():
                         logger.info(f"   Realized PnL: {floating_pnl_pct:+.2f}% (${floating_pnl_usdt:+.4f} USDT)")
                         logger.info("=" * 60)
 
-                        # Hapus dari active_positions (SLOT BEBAS KEMBALI)
                         del active_positions[symbol]
 
                 except Exception as pos_err:
@@ -385,11 +409,9 @@ async def execution_loop():
             # ------------------------------------------------------------------
             if len(active_positions) < MAX_SLOTS:
                 for symbol, strat in list(active_strategies.items()):
-                    # Cegah duplikasi koin jika symbol ini sudah punya posisi aktif
                     if symbol in active_positions:
                         continue
 
-                    # Jika slot masih tersedia, evaluasi sinyal entry
                     if len(active_positions) >= MAX_SLOTS:
                         break
 
@@ -441,6 +463,7 @@ async def execution_loop():
                                 "floating_pnl_pct": 0.0,
                                 "floating_pnl_usdt": 0.0,
                                 "is_breakeven_active": False,
+                                "is_profit_locked": False,
                                 "entry_time": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
                             }
 
