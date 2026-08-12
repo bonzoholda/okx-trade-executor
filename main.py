@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 import pandas as pd
+from datetime import datetime, timedelta
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
@@ -30,6 +31,10 @@ LOCK_PROFIT_TRIGGER_PNL_PCT = 2.0  # Tier 2: Lock +1.0% Profit at +2.0% PnL
 MIN_RSI_EXIT_PNL_PCT = 2.5        # Tier 3: Enable Dynamic Trailing & RSI Exit
 TRAILING_STOP_DIST_PCT = 1.0      # Trailing Stop Distance (%)
 MAX_HOLDING_HOURS = 12             # Timeout exit for stagnant trades (>12 hrs)
+
+# --- ⛔ CIRCUIT BREAKER COOLDOWN PARAMETERS ---
+COOLDOWN_HOURS = float(os.getenv("COOLDOWN_HOURS", "2.0")) # Durasi pemblokiran pair setelah Hit SL (Jam)
+pair_cooldowns = {}  # Memori internal: {"NEAR/USDT": datetime_target_expire}
 
 # PostgreSQL Connection Pool
 db_pool = None
@@ -61,6 +66,28 @@ class StrategyPayload(BaseModel):
     rsi_upper: float
     stop_loss_pct: float
     take_profit_pct: float
+
+
+# --- COOLDOWN HELPER FUNCTIONS ---
+def is_pair_in_cooldown(symbol: str) -> bool:
+    """Mengecek apakah pair sedang diblokir karena baru saja terkena Stop Loss"""
+    if symbol in pair_cooldowns:
+        expire_time = pair_cooldowns[symbol]
+        if datetime.now() < expire_time:
+            return True
+        else:
+            del pair_cooldowns[symbol]  # Cooldown telah kedaluwarsa, bersihkan dari memori
+            logger.info(f"🟢 [COOLDOWN EXPIRED] {symbol} is now unblocked and ready for new entries.")
+    return False
+
+
+def trigger_pair_cooldown(symbol: str, reason: str):
+    """Memasang proteksi cooldown pada pair setelah terkena SL"""
+    expire_time = datetime.now() + timedelta(hours=COOLDOWN_HOURS)
+    pair_cooldowns[symbol] = expire_time
+    logger.warning(
+        f"⛔ [CIRCUIT BREAKER ACTIVATED] {symbol} hit {reason}! Blocked from re-entry for {COOLDOWN_HOURS} hours (Until {expire_time.strftime('%H:%M:%S')})."
+    )
 
 
 # --- DATABASE HELPER FUNCTIONS ---
@@ -228,6 +255,25 @@ async def get_active_positions():
     }
 
 
+@app.get("/cooldowns")
+async def get_cooldown_status():
+    """Endpoint untuk memantau pair mana saja yang sedang diblokir cooldown"""
+    active_cooldowns = {}
+    now = datetime.now()
+    for symbol, expire in list(pair_cooldowns.items()):
+        if now < expire:
+            remaining_seconds = int((expire - now).total_seconds())
+            active_cooldowns[symbol] = {
+                "expires_at": expire.strftime("%Y-%m-%d %H:%M:%S"),
+                "remaining_minutes": round(remaining_seconds / 60, 1)
+            }
+    return {
+        "cooldown_duration_hours": COOLDOWN_HOURS,
+        "blocked_pairs_count": len(active_cooldowns),
+        "blocked_pairs": active_cooldowns
+    }
+
+
 @app.get("/stats")
 async def get_performance_stats():
     summary_stats, recent_trades = await fetch_stats_from_db()
@@ -240,11 +286,11 @@ async def get_performance_stats():
     }
 
 
-# --- BACKGROUND EXECUTION LOOP (ENHANCED STEP-LOCK & TIME-BASED EXIT ENGINE) ---
+# --- BACKGROUND EXECUTION LOOP (ENHANCED STEP-LOCK & TIME-BASED RISK ENGINE) ---
 async def execution_loop():
     global active_positions, active_strategies
     logger.info(
-        f"⚡ Multi-Slot Futures Engine Started. Max Slots: {MAX_SLOTS} | Margin/Slot: ${TRADE_AMOUNT_USDT} USDT @ {LEVERAGE}x"
+        f"⚡ Multi-Slot Futures Engine Started. Max Slots: {MAX_SLOTS} | Margin/Slot: ${TRADE_AMOUNT_USDT} USDT @ {LEVERAGE}x | Cooldown: {COOLDOWN_HOURS}h"
     )
 
     exchange = ccxt.okx({"enableRateLimit": True})
@@ -399,13 +445,17 @@ async def execution_loop():
                         logger.info(f"   Realized PnL: {floating_pnl_pct:+.2f}% (${floating_pnl_usdt:+.4f} USDT)")
                         logger.info("=" * 60)
 
+                        # ⛔ TRIGGER CIRCUIT BREAKER JIKA HIT SL
+                        if "SL HIT" in exit_reason or "STOP LOSS" in exit_reason:
+                            trigger_pair_cooldown(symbol, exit_reason)
+
                         del active_positions[symbol]
 
                 except Exception as pos_err:
                     logger.error(f"❌ Error monitoring position for {symbol}: {pos_err}")
 
             # ------------------------------------------------------------------
-            # 2. CEK PELUANG ENTRY UNTUK SLOT KOSONG (BEBAS DUPLIKASI KOIN)
+            # 2. CEK PELUANG ENTRY UNTUK SLOT KOSONG (BEBAS DUPLIKASI & COOLDOWN GUARD)
             # ------------------------------------------------------------------
             if len(active_positions) < MAX_SLOTS:
                 for symbol, strat in list(active_strategies.items()):
@@ -414,6 +464,10 @@ async def execution_loop():
 
                     if len(active_positions) >= MAX_SLOTS:
                         break
+
+                    # ⛔ COOLDOWN CHECK: Skip entry jika pair sedang dalam masa pemblokiran
+                    if is_pair_in_cooldown(symbol):
+                        continue
 
                     try:
                         direction = strat["direction"]
