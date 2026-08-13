@@ -163,7 +163,7 @@ async def fetch_stats_from_db():
 
             recent_trades_rows = await conn.fetch("""
                 SELECT id, symbol, direction, leverage, entry_price, exit_price, exit_reason, pnl_usdt, pnl_pct, exit_time
-                FROM trades ORDER BY id ASC LIMIT 500
+                FROM trades ORDER BY id DESC LIMIT 500
             """)
 
             total_trades = summary_row['total_trades'] or 0
