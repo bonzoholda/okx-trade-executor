@@ -172,7 +172,7 @@ async def fetch_stats_from_db():
             total_pnl = float(summary_row['total_pnl'] or 0.0)
             win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0.0
 
-            recent_trades = [dict(r) for r in recent_trades_rows]
+            recent_trades = [dict(r) for r in reversed(recent_trades_rows)]
 
             return {
                 "initial_balance": 1000.0,
