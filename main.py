@@ -19,7 +19,8 @@ app = FastAPI(title="OKX Multi-Slot Futures Paper Trading Executor Engine")
 
 # --- CONFIGURATION ---
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "my_secret_token_123")
-TRADE_AMOUNT_USDT = float(os.getenv("TRADE_AMOUNT_USDT", "20.0")) # Margin per slot
+RISK_EQUITY_PCT = float(os.getenv("RISK_EQUITY_PCT", "0.10"))     # 10% Equity per trade
+MIN_MARGIN_USDT = float(os.getenv("MIN_MARGIN_USDT", "10.0"))     # Minimum Margin per slot
 LEVERAGE = int(os.getenv("LEVERAGE", "3"))
 MAX_SLOTS = int(os.getenv("MAX_SLOTS", "3"))                      # Maksimal 3 slot aktif
 PORT = int(os.getenv("PORT", "8080"))
@@ -76,7 +77,7 @@ def is_pair_in_cooldown(symbol: str) -> bool:
         if datetime.now() < expire_time:
             return True
         else:
-            del pair_cooldowns[symbol]  # Cooldown telah kedaluwarsa, bersihkan dari memori
+            del pair_cooldowns[symbol]
             logger.info(f"🟢 [COOLDOWN EXPIRED] {symbol} is now unblocked and ready for new entries.")
     return False
 
@@ -286,11 +287,30 @@ async def get_performance_stats():
     }
 
 
-# --- BACKGROUND EXECUTION LOOP (ENHANCED STEP-LOCK & TIME-BASED RISK ENGINE) ---
+@app.delete("/admin/clean-old-trades")
+async def clean_old_trades(secret: str):
+    """Endpoint admin untuk membersihkan transaksi lama sebelum ID #48"""
+    if secret != WEBHOOK_SECRET:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    
+    if not db_pool:
+        return {"error": "Database not connected"}
+
+    try:
+        async with db_pool.acquire() as conn:
+            result = await conn.execute("DELETE FROM trades WHERE id < 48;")
+            logger.info("🧹 [DB CLEANUP] Deleted all trades prior to Trade #48.")
+            return {"status": "success", "message": f"Successfully deleted trades < #48. Result: {result}"}
+    except Exception as e:
+        logger.error(f"❌ Failed to delete old trades: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+# --- BACKGROUND EXECUTION LOOP (DYNAMIC SIZING & STEP-LOCK RISK ENGINE) ---
 async def execution_loop():
     global active_positions, active_strategies
     logger.info(
-        f"⚡ Multi-Slot Futures Engine Started. Max Slots: {MAX_SLOTS} | Margin/Slot: ${TRADE_AMOUNT_USDT} USDT @ {LEVERAGE}x | Cooldown: {COOLDOWN_HOURS}h"
+        f"⚡ Dynamic Sizing Futures Engine Started. Max Slots: {MAX_SLOTS} | Dynamic Sizing: {RISK_EQUITY_PCT * 100}% Equity/Slot @ {LEVERAGE}x | Cooldown: {COOLDOWN_HOURS}h"
     )
 
     exchange = ccxt.okx({"enableRateLimit": True})
@@ -318,6 +338,7 @@ async def execution_loop():
                     entry_p = pos["entry_price"]
                     sl_p = pos["stop_loss_price"]
                     tp_p = pos["take_profit_price"]
+                    slot_margin_usdt = pos.get("margin_usdt", MIN_MARGIN_USDT)
 
                     # Hitung PnL Berdasarkan Direction & Leverage
                     if pos_direction == "LONG":
@@ -330,7 +351,7 @@ async def execution_loop():
                             pos["best_price"] = current_price
 
                     floating_pnl_pct = raw_price_change_pct * LEVERAGE * 100
-                    floating_pnl_usdt = TRADE_AMOUNT_USDT * (raw_price_change_pct * LEVERAGE)
+                    floating_pnl_usdt = slot_margin_usdt * (raw_price_change_pct * LEVERAGE)
 
                     pos["current_price"] = current_price
                     pos["current_rsi"] = current_rsi
@@ -383,7 +404,7 @@ async def execution_loop():
                     hours_held = (pd.Timestamp.now() - entry_dt).total_seconds() / 3600.0
 
                     logger.info(
-                        f"📈 [SLOT ACTIVE: {symbol} {pos_direction} {LEVERAGE}x] Price: ${current_price:,.4f} | Entry: ${entry_p:,.4f} | PnL: {floating_pnl_pct:+.2f}% | Duration: {hours_held:.1f}h"
+                        f"📈 [SLOT ACTIVE: {symbol} {pos_direction} {LEVERAGE}x] Price: ${current_price:,.4f} | Margin: ${slot_margin_usdt:.2f} | PnL: {floating_pnl_pct:+.2f}% | Duration: {hours_held:.1f}h"
                     )
 
                     # --- 🔴 CHECK EXIT TRIGGERS ---
@@ -455,7 +476,7 @@ async def execution_loop():
                     logger.error(f"❌ Error monitoring position for {symbol}: {pos_err}")
 
             # ------------------------------------------------------------------
-            # 2. CEK PELUANG ENTRY UNTUK SLOT KOSONG (BEBAS DUPLIKASI & COOLDOWN GUARD)
+            # 2. CEK PELUANG ENTRY UNTUK SLOT KOSONG (DYNAMIC 10% EQUITY SIZING)
             # ------------------------------------------------------------------
             if len(active_positions) < MAX_SLOTS:
                 for symbol, strat in list(active_strategies.items()):
@@ -465,7 +486,7 @@ async def execution_loop():
                     if len(active_positions) >= MAX_SLOTS:
                         break
 
-                    # ⛔ COOLDOWN CHECK: Skip entry jika pair sedang dalam masa pemblokiran
+                    # ⛔ COOLDOWN CHECK
                     if is_pair_in_cooldown(symbol):
                         continue
 
@@ -491,8 +512,16 @@ async def execution_loop():
                         )
 
                         if is_entry_triggered:
-                            effective_margin = TRADE_AMOUNT_USDT * LEVERAGE
-                            amount = effective_margin / current_price
+                            # 💡 DYNAMIC POSITION SIZING: Ambil saldo terkini dari DB & hitung 10% Equity
+                            stats_summary, _ = await fetch_stats_from_db()
+                            current_equity = stats_summary.get("current_balance", 1000.0)
+                            
+                            dynamic_margin_usdt = round(current_equity * RISK_EQUITY_PCT, 2)
+                            if dynamic_margin_usdt < MIN_MARGIN_USDT:
+                                dynamic_margin_usdt = MIN_MARGIN_USDT
+
+                            effective_notional = dynamic_margin_usdt * LEVERAGE
+                            amount = effective_notional / current_price
 
                             if direction == "LONG":
                                 sl_price = current_price * (1 - strat["stop_loss_pct"])
@@ -510,7 +539,7 @@ async def execution_loop():
                                 "best_price": current_price,
                                 "current_rsi": current_rsi,
                                 "amount": amount,
-                                "margin_usdt": TRADE_AMOUNT_USDT,
+                                "margin_usdt": dynamic_margin_usdt,
                                 "initial_stop_loss": sl_price,
                                 "stop_loss_price": sl_price,
                                 "take_profit_price": tp_price,
@@ -522,9 +551,10 @@ async def execution_loop():
                             }
 
                             logger.info("=" * 60)
-                            logger.info(f"🟢 [NEW SLOT OCCUPIED] [{symbol} {direction}] ENTRY EXECUTED ({len(active_positions)}/{MAX_SLOTS} Slots)")
+                            logger.info(f"🟢 [NEW SLOT OCCUPIED] [{symbol} {direction}] DYNAMIC ENTRY EXECUTED ({len(active_positions)}/{MAX_SLOTS} Slots)")
                             logger.info(f"   Entry Price  : ${current_price:,.4f}")
-                            logger.info(f"   Margin / Leverage: ${TRADE_AMOUNT_USDT} USDT @ {LEVERAGE}x")
+                            logger.info(f"   Equity Balance: ${current_equity:,.2f} USDT")
+                            logger.info(f"   Margin / Slot: ${dynamic_margin_usdt:,.2f} USDT ({RISK_EQUITY_PCT * 100}% Equity) @ {LEVERAGE}x")
                             logger.info(f"   Initial Stop Loss: ${sl_price:,.4f}")
                             logger.info(f"   Take Profit Target: ${tp_price:,.4f}")
                             logger.info("=" * 60)
