@@ -17,21 +17,22 @@ logger = logging.getLogger("OKX-Futures-Executor")
 
 app = FastAPI(title="OKX Multi-Slot Futures Paper Trading Executor Engine")
 
-# --- CONFIGURATION ---
+# --- CONFIGURATION & MATHEMATICAL BOOST TWEAKS ---
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "my_secret_token_123")
-RISK_EQUITY_PCT = float(os.getenv("RISK_EQUITY_PCT", "0.10"))     # 10% Equity per trade
+RISK_EQUITY_PCT = float(os.getenv("RISK_EQUITY_PCT", "0.12"))     # TWEAK 3: Boost Dynamic Sizing ke 12% Equity/Slot
 MIN_MARGIN_USDT = float(os.getenv("MIN_MARGIN_USDT", "10.0"))     # Minimum Margin per slot
-LEVERAGE = int(os.getenv("LEVERAGE", "3"))
+LEVERAGE = int(os.getenv("LEVERAGE", "3"))                         # Retain Leverage at 3x
 MAX_SLOTS = int(os.getenv("MAX_SLOTS", "3"))                      # Maksimal 3 slot aktif
 PORT = int(os.getenv("PORT", "8080"))
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
-# --- ENHANCED STEP-LOCK & TIME-BASED RISK PARAMETERS ---
-BREAKEVEN_TRIGGER_PNL_PCT = 1.2   # Tier 1: Lock Break-Even (0.0%) at +1.2% PnL
-LOCK_PROFIT_TRIGGER_PNL_PCT = 2.0  # Tier 2: Lock +1.0% Profit at +2.0% PnL
-MIN_RSI_EXIT_PNL_PCT = 2.5        # Tier 3: Enable Dynamic Trailing & RSI Exit
-TRAILING_STOP_DIST_PCT = 1.0      # Trailing Stop Distance (%)
+# --- 🚀 OPTIMIZED STEP-LOCK & TIME-BASED RISK PARAMETERS ---
+BREAKEVEN_TRIGGER_PNL_PCT = 1.5   # TWEAK 1: Tier 1 - Lock Break-Even at +1.5% PnL
+LOCK_PROFIT_TRIGGER_PNL_PCT = 2.5  # TWEAK 1: Tier 2 - Lock +1.2% Profit at +2.5% PnL
+MIN_RSI_EXIT_PNL_PCT = 4.5        # TWEAK 1: Tier 3 - Enable RSI Exit pada Target Min +4.5% PnL
+TRAILING_STOP_DIST_PCT = 1.2      # Trailing Stop Distance (%)
 MAX_HOLDING_HOURS = 12             # Timeout exit for stagnant trades (>12 hrs)
+DEFAULT_MAX_SL_PCT = 0.014        # TWEAK 2: Hard Cap Initial Stop Loss di 1.4% Price (setara -4.2% Margin PnL)
 
 # --- ⛔ CIRCUIT BREAKER COOLDOWN PARAMETERS ---
 COOLDOWN_HOURS = float(os.getenv("COOLDOWN_HOURS", "2.0")) # Durasi pemblokiran pair setelah Hit SL (Jam)
@@ -49,7 +50,7 @@ active_strategies = {
         "rsi_period": 14,
         "rsi_lower": 30.0,
         "rsi_upper": 70.0,
-        "stop_loss_pct": 0.02,
+        "stop_loss_pct": DEFAULT_MAX_SL_PCT,
         "take_profit_pct": 0.05,
         "current_rsi": 50.0,
         "is_active": True,
@@ -208,6 +209,9 @@ async def update_strategy(
         )
 
     global active_strategies
+    # TWEAK 2: Filter stop_loss_pct agar tidak pernah melebihi Hard Cap 1.4%
+    capped_sl_pct = min(payload.stop_loss_pct, DEFAULT_MAX_SL_PCT)
+
     active_strategies[payload.symbol] = {
         "symbol": payload.symbol,
         "direction": payload.direction.upper(),
@@ -215,14 +219,14 @@ async def update_strategy(
         "rsi_period": payload.rsi_period,
         "rsi_lower": payload.rsi_lower,
         "rsi_upper": payload.rsi_upper,
-        "stop_loss_pct": payload.stop_loss_pct,
+        "stop_loss_pct": capped_sl_pct,
         "take_profit_pct": payload.take_profit_pct,
         "current_rsi": 50.0,
         "is_active": True,
     }
 
     logger.info(
-        f"🔥 [Hot-Reload] Strategy Updated for [{payload.symbol}] ({payload.direction})!"
+        f"🔥 [Hot-Reload] Strategy Updated for [{payload.symbol}] ({payload.direction}) | Capped SL: {capped_sl_pct * 100}%"
     )
     return {
         "status": "success",
@@ -258,7 +262,6 @@ async def get_active_positions():
 
 @app.get("/cooldowns")
 async def get_cooldown_status():
-    """Endpoint untuk memantau pair mana saja yang sedang diblokir cooldown"""
     active_cooldowns = {}
     now = datetime.now()
     for symbol, expire in list(pair_cooldowns.items()):
@@ -289,7 +292,6 @@ async def get_performance_stats():
 
 @app.delete("/admin/clean-old-trades")
 async def clean_old_trades(secret: str):
-    """Endpoint admin untuk membersihkan transaksi lama sebelum ID #48"""
     if secret != WEBHOOK_SECRET:
         raise HTTPException(status_code=401, detail="Unauthorized")
     
@@ -306,11 +308,11 @@ async def clean_old_trades(secret: str):
         return {"status": "error", "message": str(e)}
 
 
-# --- BACKGROUND EXECUTION LOOP (DYNAMIC SIZING & STEP-LOCK RISK ENGINE) ---
+# --- BACKGROUND EXECUTION LOOP (HIGH-PERFORMANCE STEP-LOCK & DYNAMIC SIZING ENGINE) ---
 async def execution_loop():
     global active_positions, active_strategies
     logger.info(
-        f"⚡ Dynamic Sizing Futures Engine Started. Max Slots: {MAX_SLOTS} | Dynamic Sizing: {RISK_EQUITY_PCT * 100}% Equity/Slot @ {LEVERAGE}x | Cooldown: {COOLDOWN_HOURS}h"
+        f"⚡ High-Growth Futures Engine Started. Slots: {MAX_SLOTS} | Dynamic Sizing: {RISK_EQUITY_PCT * 100}% Equity/Slot @ {LEVERAGE}x | Target RSI Exit: +{MIN_RSI_EXIT_PNL_PCT}% PnL"
     )
 
     exchange = ccxt.okx({"enableRateLimit": True})
@@ -322,7 +324,7 @@ async def execution_loop():
                 continue
 
             # ------------------------------------------------------------------
-            # 1. EVALUASI POSISI AKTIF (STEP-LOCK & TIME-BASED STAGNANCY EXIT)
+            # 1. EVALUASI POSISI AKTIF (OPTIMIZED STEP-LOCK & RSI EXIT)
             # ------------------------------------------------------------------
             for symbol, pos in list(active_positions.items()):
                 try:
@@ -361,30 +363,30 @@ async def execution_loop():
                     if symbol in active_strategies:
                         active_strategies[symbol]["current_rsi"] = current_rsi
 
-                    # --- 🛡️ ENHANCED STEP-LOCK TRAILING LOGIC ---
+                    # --- 🛡️ TWEAK 1: ENHANCED STEP-LOCK TRAILING LOGIC ---
                     best_p = pos["best_price"]
 
-                    # TIER 1: Break-Even Lock at +1.2% PnL (Risk-Free)
+                    # TIER 1: Break-Even Lock at +1.5% PnL
                     if floating_pnl_pct >= BREAKEVEN_TRIGGER_PNL_PCT and not pos["is_breakeven_active"]:
                         pos["stop_loss_price"] = entry_p
                         pos["is_breakeven_active"] = True
                         sl_p = entry_p
                         logger.info(f"🛡️ [STEP-LOCK TIER 1] [{symbol}] SL locked to Break-Even (${entry_p:,.4f}).")
 
-                    # TIER 2: Lock Minimum +1.0% Profit at +2.0% PnL
+                    # TIER 2: Lock Minimum +1.2% Profit at +2.5% PnL
                     if floating_pnl_pct >= LOCK_PROFIT_TRIGGER_PNL_PCT and not pos.get("is_profit_locked", False):
                         if pos_direction == "LONG":
-                            locked_sl = entry_p * (1 + (1.0 / 100 / LEVERAGE))
+                            locked_sl = entry_p * (1 + (1.2 / 100 / LEVERAGE))
                         else:  # SHORT
-                            locked_sl = entry_p * (1 - (1.0 / 100 / LEVERAGE))
+                            locked_sl = entry_p * (1 - (1.2 / 100 / LEVERAGE))
 
                         if (pos_direction == "LONG" and locked_sl > sl_p) or (pos_direction == "SHORT" and locked_sl < sl_p):
                             pos["stop_loss_price"] = locked_sl
                             sl_p = locked_sl
                             pos["is_profit_locked"] = True
-                            logger.info(f"💰 [STEP-LOCK TIER 2] [{symbol}] Minimum +1.0% profit locked at SL ${sl_p:,.4f}.")
+                            logger.info(f"💰 [STEP-LOCK TIER 2] [{symbol}] Minimum +1.2% profit locked at SL ${sl_p:,.4f}.")
 
-                    # TIER 3: Dynamic Trailing Stop at >= +2.5% PnL
+                    # TIER 3: Dynamic Trailing Stop at >= +4.5% PnL
                     if floating_pnl_pct >= MIN_RSI_EXIT_PNL_PCT:
                         if pos_direction == "LONG":
                             new_trailing_sl = best_p * (1 - (TRAILING_STOP_DIST_PCT / 100 / LEVERAGE))
@@ -430,7 +432,7 @@ async def execution_loop():
                         should_close = True
                         exit_reason = "TAKE PROFIT HIT 🟢"
 
-                    # 3. RSI Exit (Only if PnL >= +2.5%)
+                    # 3. RSI Exit (Only if PnL >= +4.5%)
                     elif pos_direction == "LONG" and current_rsi > rsi_upper and floating_pnl_pct >= MIN_RSI_EXIT_PNL_PCT:
                         should_close = True
                         exit_reason = f"RSI EXIT SIGNAL ({current_rsi:.1f}) @ PnL {floating_pnl_pct:+.2f}% 🟡"
@@ -476,7 +478,7 @@ async def execution_loop():
                     logger.error(f"❌ Error monitoring position for {symbol}: {pos_err}")
 
             # ------------------------------------------------------------------
-            # 2. CEK PELUANG ENTRY UNTUK SLOT KOSONG (DYNAMIC 10% EQUITY SIZING)
+            # 2. CEK PELUANG ENTRY UNTUK SLOT KOSONG (DYNAMIC 12% EQUITY SIZING)
             # ------------------------------------------------------------------
             if len(active_positions) < MAX_SLOTS:
                 for symbol, strat in list(active_strategies.items()):
@@ -512,7 +514,7 @@ async def execution_loop():
                         )
 
                         if is_entry_triggered:
-                            # 💡 DYNAMIC POSITION SIZING: Ambil saldo terkini dari DB & hitung 10% Equity
+                            # 💡 TWEAK 3: DYNAMIC POSITION SIZING (12% Equity per Slot)
                             stats_summary, _ = await fetch_stats_from_db()
                             current_equity = stats_summary.get("current_balance", 1000.0)
                             
@@ -523,11 +525,14 @@ async def execution_loop():
                             effective_notional = dynamic_margin_usdt * LEVERAGE
                             amount = effective_notional / current_price
 
+                            # TWEAK 2: Hard Cap Stop Loss di 1.4% Price (setara -4.2% Margin PnL)
+                            sl_pct = min(strat.get("stop_loss_pct", DEFAULT_MAX_SL_PCT), DEFAULT_MAX_SL_PCT)
+
                             if direction == "LONG":
-                                sl_price = current_price * (1 - strat["stop_loss_pct"])
+                                sl_price = current_price * (1 - sl_pct)
                                 tp_price = current_price * (1 + strat["take_profit_pct"])
                             else:
-                                sl_price = current_price * (1 + strat["stop_loss_pct"])
+                                sl_price = current_price * (1 + sl_pct)
                                 tp_price = current_price * (1 - strat["take_profit_pct"])
 
                             active_positions[symbol] = {
@@ -555,7 +560,7 @@ async def execution_loop():
                             logger.info(f"   Entry Price  : ${current_price:,.4f}")
                             logger.info(f"   Equity Balance: ${current_equity:,.2f} USDT")
                             logger.info(f"   Margin / Slot: ${dynamic_margin_usdt:,.2f} USDT ({RISK_EQUITY_PCT * 100}% Equity) @ {LEVERAGE}x")
-                            logger.info(f"   Initial Stop Loss: ${sl_price:,.4f}")
+                            logger.info(f"   Initial Stop Loss: ${sl_price:,.4f} (-{sl_pct * LEVERAGE * 100:.1f}% Margin PnL)")
                             logger.info(f"   Take Profit Target: ${tp_price:,.4f}")
                             logger.info("=" * 60)
 
