@@ -45,24 +45,36 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
     body { background-color: #0d1117; color: #c9d1d9; font-family: ui-monospace, monospace; }
-    .brand-logo { height: 40px; width: auto; object-fit: contain; }
+    /* Optimasi Skala Logo agar Tampil Lebih Besar & Jelas */
+    .brand-logo { height: 56px; width: auto; object-fit: contain; }
   </style>
 </head>
 <body class="p-4 md:p-6">
   <div class="max-w-7xl mx-auto space-y-6">
     
-    <!-- HEADER -->
-    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center border-b border-gray-800 pb-4 gap-2">
-      <div class="flex items-center gap-3">
-        <!-- tethgard Brand Logo -->
-        <img src="/static/asset/tgard-logo.png" alt="tethgard - Autonomous Trading Partner" class="brand-logo">
+    <!-- HEADER BARU: PRO-INVESTOR DISPLAY -->
+    <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center border-b border-gray-800 pb-4 gap-4">
+      <div class="flex items-center gap-4">
+        <!-- Logo Berukuran Lebih Besar -->
+        <img src="/static/asset/tgard-logo.png" alt="tethgard Logo" class="brand-logo">
+        <div class="border-l border-gray-800 pl-4 py-1">
+          <div class="flex items-center gap-2">
+            <span class="text-xs font-bold tracking-widest text-emerald-400 uppercase">Autonomous Trading Partner</span>
+            <span class="text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded font-mono">LIVE TRACKING</span>
+          </div>
+          <p class="text-[11px] text-gray-400 mt-0.5">Real-Time Algorithmic Execution & Transparent Performance Monitor</p>
+        </div>
       </div>
-      <div class="flex items-center gap-2 bg-gray-900 border border-gray-800 px-3 py-1.5 rounded-full">
-        <span class="relative flex h-2.5 w-2.5">
-          <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-          <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
-        </span>
-        <span id="slot-status-badge" class="text-xs font-semibold text-emerald-400">SLOTS ACTIVE: 0/3</span>
+
+      <!-- BADGE STATUS TERMINAL -->
+      <div class="flex items-center gap-3">
+        <div class="flex items-center gap-2 bg-gray-900 border border-gray-800 px-3 py-1.5 rounded-full">
+          <span class="relative flex h-2.5 w-2.5">
+            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+            <span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span>
+          </span>
+          <span id="slot-status-badge" class="text-xs font-semibold text-emerald-400">SLOTS ACTIVE: 0/3</span>
+        </div>
       </div>
     </div>
 
@@ -80,19 +92,14 @@
         <span class="text-[11px] text-gray-400">PnL %</span>
         <div id="pnl-pct-val" class="text-lg md:text-xl font-bold text-emerald-400 mt-1">+0.00%</div>
       </div>
-      
-      <!-- CARD BARU 1: Active Bot Duration -->
       <div class="bg-gray-900 border border-gray-800 p-3.5 rounded-xl">
         <span class="text-[11px] text-gray-400">Active Bot Duration</span>
         <div id="duration-val" class="text-lg md:text-xl font-bold text-sky-400 mt-1">0.0 Days</div>
       </div>
-
-      <!-- CARD BARU 2: Average Daily Growth % -->
       <div class="bg-gray-900 border border-gray-800 p-3.5 rounded-xl">
         <span class="text-[11px] text-gray-400">Avg Daily Growth</span>
         <div id="daily-growth-val" class="text-lg md:text-xl font-bold text-amber-400 mt-1">+0.00% / day</div>
       </div>
-
       <div class="bg-gray-900 border border-gray-800 p-3.5 rounded-xl">
         <span class="text-[11px] text-gray-400">Win Rate</span>
         <div id="winrate-val" class="text-lg md:text-xl font-bold text-white mt-1">0.0%</div>
@@ -324,18 +331,17 @@
           }).join('');
           document.getElementById('trade-history-rows').innerHTML = rowsHTML;
 
-          // --- KALKULASI ACTIVE BOT DURATION & AVG DAILY GROWTH ---
-          const firstTrade = history[0]; // Trade terlama (awal)
-          const lastTrade = history[history.length - 1]; // Trade terbaru (akhir)
+          // Kalkulasi Active Bot Duration & Avg Daily Growth
+          const firstTrade = history[0];
+          const lastTrade = history[history.length - 1];
           
-          let activeDays = 0.1; // Fallback min agar tidak divide by zero
+          let activeDays = 0.1;
           if (firstTrade && lastTrade) {
             const startTime = new Date(firstTrade.entry_time || firstTrade.exit_time).getTime();
             const endTime = new Date(lastTrade.exit_time).getTime();
             const durationMs = Math.max(0, endTime - startTime);
             activeDays = Math.max(0.01, durationMs / (1000 * 60 * 60 * 24));
 
-            // Format Tampilan Active Bot Duration
             const durationElem = document.getElementById('duration-val');
             if (activeDays >= 1.0) {
               durationElem.innerText = `${activeDays.toFixed(1)} Days`;
@@ -345,7 +351,6 @@
             }
           }
 
-          // Kalkulasi Average Daily Growth %
           const avgDailyGrowth = pnlPctRatio / activeDays;
           const dailyGrowthElem = document.getElementById('daily-growth-val');
           dailyGrowthElem.innerText = `${avgDailyGrowth >= 0 ? '+' : ''}${avgDailyGrowth.toFixed(2)}% / day`;
