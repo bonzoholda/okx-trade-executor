@@ -3,11 +3,49 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Bayesian Multi-Slot Futures Terminal</title>
+  
+  <!-- --- REBRANDING & FAVICON --- -->
+  <title>tethgard - Autonomous Trading Partner</title>
+  <link rel="icon" type="image/png" href="/static/asset/tgard-fav.png">
+  <link rel="apple-touch-icon" href="/static/asset/tgard-fav.png">
+
+  <!-- --- SEO & AI ENGINE OPTIMIZATION META-TAGS --- -->
+  <meta name="description" content="tethgard is an autonomous quantitative trading engine offering multi-slot execution, dynamic positioning, and real-time risk management for OKX futures markets.">
+  <meta name="keywords" content="tethgard, Autonomous Trading Partner, Quant Trading Engine, OKX Futures Bot, Algorithmic Trading, Multi-Slot Executor">
+  <meta name="author" content="tethgard Protocols">
+  <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+
+  <!-- OpenGraph (Facebook, Discord, Telegram Link Previews) -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="tethgard - Autonomous Trading Partner">
+  <meta property="og:description" content="Next-Gen Autonomous Trading Terminal for Multi-Slot OKX Futures Execution. Built for high performance and strict capital protection.">
+  <meta property="og:image" content="/static/asset/tgard-logo.png">
+  <meta property="og:site_name" content="tethgard">
+
+  <!-- Twitter Card -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="tethgard - Autonomous Trading Partner">
+  <meta name="twitter:description" content="Next-Gen Autonomous Trading Terminal for Multi-Slot OKX Futures Execution.">
+  <meta name="twitter:image" content="/static/asset/tgard-logo.png">
+
+  <!-- AI Crawler & Machine Reading Metadata (Schema.org / JSON-LD) -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "tethgard - Autonomous Trading Partner",
+    "operatingSystem": "Web",
+    "applicationCategory": "FinanceApplication",
+    "description": "Autonomous quantitative futures trading executor engine featuring dynamic position sizing, step-lock risk control, and real-time dashboard analytics.",
+    "icons": "/static/asset/tgard-fav.png"
+  }
+  </script>
+
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
     body { background-color: #0d1117; color: #c9d1d9; font-family: ui-monospace, monospace; }
+    .brand-logo { height: 40px; width: auto; object-fit: contain; }
   </style>
 </head>
 <body class="p-4 md:p-6">
@@ -15,11 +53,9 @@
     
     <!-- HEADER -->
     <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center border-b border-gray-800 pb-4 gap-2">
-      <div>
-        <h1 class="text-2xl font-bold text-white flex items-center gap-2">
-          ⚡ Multi-Slot Futures Trading Terminal
-        </h1>
-        <p class="text-xs text-gray-400 mt-1">Multi-Asset Autoresearch & Concurrent Multi-Position Engine (Max 3 Slots)</p>
+      <div class="flex items-center gap-3">
+        <!-- tethgard Brand Logo -->
+        <img src="/static/asset/tgard-logo.png" alt="tethgard - Autonomous Trading Partner" class="brand-logo">
       </div>
       <div class="flex items-center gap-2 bg-gray-900 border border-gray-800 px-3 py-1.5 rounded-full">
         <span class="relative flex h-2.5 w-2.5">
@@ -31,7 +67,7 @@
     </div>
 
     <!-- METRICS GRID -->
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+    <div class="grid grid-cols-2 md:grid-cols-5 gap-4">
       <div class="bg-gray-900 border border-gray-800 p-4 rounded-xl">
         <span class="text-xs text-gray-400">Total Balance</span>
         <div id="balance-val" class="text-xl md:text-2xl font-bold text-white mt-1">$1,000.00</div>
@@ -39,6 +75,10 @@
       <div class="bg-gray-900 border border-gray-800 p-4 rounded-xl">
         <span class="text-xs text-gray-400">Total Realized PnL</span>
         <div id="pnl-val" class="text-xl md:text-2xl font-bold text-emerald-400 mt-1">+$0.00</div>
+      </div>
+      <div class="bg-gray-900 border border-gray-800 p-4 rounded-xl">
+        <span class="text-xs text-gray-400">PnL %</span>
+        <div id="pnl-pct-val" class="text-xl md:text-2xl font-bold text-emerald-400 mt-1">+0.00%</div>
       </div>
       <div class="bg-gray-900 border border-gray-800 p-4 rounded-xl">
         <span class="text-xs text-gray-400">Win Rate</span>
@@ -54,13 +94,12 @@
     <div class="bg-gray-900 border border-gray-800 p-5 rounded-xl space-y-4">
       <div class="flex justify-between items-center border-b border-gray-800 pb-2">
         <h2 class="text-xs font-semibold text-gray-400 tracking-wider uppercase">
-          🎯 Active Position Slots (Concurrent Multi-Trade)
+          Active Position Slots (Concurrent Multi-Trade)
         </h2>
-        <span class="text-xs text-gray-500">Margin/Slot: $20.00 USDT @ 3x</span>
+        <span class="text-xs text-gray-500">Margin/Slot: Dynamic, 12% of Equity @ 3x</span>
       </div>
 
       <div id="positions-grid" class="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <!-- Positions Card Will Be Rendered Dynamically Here -->
         <div class="col-span-3 text-center py-8 text-gray-500 italic text-sm">
           No active positions in any slot. Monitoring OKX feed for winner strategy triggers...
         </div>
@@ -70,7 +109,7 @@
     <!-- ACTIVE STRATEGIES QUEUE -->
     <div class="bg-gray-900 border border-gray-800 p-5 rounded-xl">
       <h2 class="text-xs font-semibold text-gray-400 tracking-wider uppercase mb-3">
-        🏆 Registered Active Winner Strategies
+        Registered Active Winner Strategies
       </h2>
       <div id="strategies-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
         <div class="text-gray-500 text-xs italic">Loading active strategies...</div>
@@ -79,7 +118,7 @@
 
     <!-- CHART SECTION -->
     <div class="bg-gray-900 border border-gray-800 p-5 rounded-xl">
-      <h2 class="text-xs font-semibold text-gray-400 tracking-wider uppercase mb-3">📈 PostgreSQL Persistent PnL Growth Chart</h2>
+      <h2 class="text-xs font-semibold text-gray-400 tracking-wider uppercase mb-3">Equity Growth Chart</h2>
       <div class="h-60 mt-2">
         <canvas id="pnlChart"></canvas>
       </div>
@@ -87,7 +126,7 @@
 
     <!-- TRADE HISTORY TABLE -->
     <div class="bg-gray-900 border border-gray-800 p-5 rounded-xl">
-      <h2 class="text-xs font-semibold text-gray-400 tracking-wider uppercase mb-3">📜 Database Trades History Log</h2>
+      <h2 class="text-xs font-semibold text-gray-400 tracking-wider uppercase mb-3">Trades History</h2>
       <div class="overflow-x-auto">
         <table class="w-full text-xs text-left">
           <thead class="text-gray-400 bg-gray-800/60 uppercase text-[10px]">
@@ -150,12 +189,20 @@
 
         // 1. Update Metrics Summary
         const s = statsData.summary;
+        const initialEquity = s.initial_balance || 1000.0;
         document.getElementById('balance-val').innerText = `$${s.current_balance.toFixed(2)}`;
         
+        // Update PnL ($)
         const pnlElem = document.getElementById('pnl-val');
         pnlElem.innerText = `${s.total_pnl_usdt >= 0 ? '+' : ''}$${s.total_pnl_usdt.toFixed(2)}`;
         pnlElem.className = `text-xl md:text-2xl font-bold mt-1 ${s.total_pnl_usdt >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
         
+        // Update PnL (%) Ratio vs Initial Equity
+        const pnlPctRatio = (s.total_pnl_usdt / initialEquity) * 100;
+        const pnlPctElem = document.getElementById('pnl-pct-val');
+        pnlPctElem.innerText = `${pnlPctRatio >= 0 ? '+' : ''}${pnlPctRatio.toFixed(2)}%`;
+        pnlPctElem.className = `text-xl md:text-2xl font-bold mt-1 ${pnlPctRatio >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+
         document.getElementById('winrate-val').innerText = `${s.win_rate_pct.toFixed(1)}%`;
         document.getElementById('trades-val').innerText = s.total_trades;
 
