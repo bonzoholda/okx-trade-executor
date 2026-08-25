@@ -15,7 +15,7 @@
   <meta name="author" content="tethgard Protocols">
   <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
 
-  <!-- OpenGraph (Facebook, Discord, Telegram Link Previews) -->
+  <!-- OpenGraph -->
   <meta property="og:type" content="website">
   <meta property="og:title" content="tethgard - Autonomous Trading Partner">
   <meta property="og:description" content="Next-Gen Autonomous Trading Terminal for Multi-Slot OKX Futures Execution. Built for high performance and strict capital protection.">
@@ -28,7 +28,7 @@
   <meta name="twitter:description" content="Next-Gen Autonomous Trading Terminal for Multi-Slot OKX Futures Execution.">
   <meta name="twitter:image" content="/static/asset/tgard-logo.png">
 
-  <!-- AI Crawler & Machine Reading Metadata (Schema.org / JSON-LD) -->
+  <!-- Structured Data JSON-LD -->
   <script type="application/ld+json">
   {
     "@context": "https://schema.org",
@@ -66,27 +66,40 @@
       </div>
     </div>
 
-    <!-- METRICS GRID -->
-    <div class="grid grid-cols-2 md:grid-cols-5 gap-4">
-      <div class="bg-gray-900 border border-gray-800 p-4 rounded-xl">
-        <span class="text-xs text-gray-400">Total Balance</span>
-        <div id="balance-val" class="text-xl md:text-2xl font-bold text-white mt-1">$1,000.00</div>
+    <!-- METRICS GRID (7-CARD RESPONSIVE GRID) -->
+    <div class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+      <div class="bg-gray-900 border border-gray-800 p-3.5 rounded-xl">
+        <span class="text-[11px] text-gray-400">Total Balance</span>
+        <div id="balance-val" class="text-lg md:text-xl font-bold text-white mt-1">$1,000.00</div>
       </div>
-      <div class="bg-gray-900 border border-gray-800 p-4 rounded-xl">
-        <span class="text-xs text-gray-400">Total Realized PnL</span>
-        <div id="pnl-val" class="text-xl md:text-2xl font-bold text-emerald-400 mt-1">+$0.00</div>
+      <div class="bg-gray-900 border border-gray-800 p-3.5 rounded-xl">
+        <span class="text-[11px] text-gray-400">Total Realized PnL</span>
+        <div id="pnl-val" class="text-lg md:text-xl font-bold text-emerald-400 mt-1">+$0.00</div>
       </div>
-      <div class="bg-gray-900 border border-gray-800 p-4 rounded-xl">
-        <span class="text-xs text-gray-400">PnL %</span>
-        <div id="pnl-pct-val" class="text-xl md:text-2xl font-bold text-emerald-400 mt-1">+0.00%</div>
+      <div class="bg-gray-900 border border-gray-800 p-3.5 rounded-xl">
+        <span class="text-[11px] text-gray-400">PnL %</span>
+        <div id="pnl-pct-val" class="text-lg md:text-xl font-bold text-emerald-400 mt-1">+0.00%</div>
       </div>
-      <div class="bg-gray-900 border border-gray-800 p-4 rounded-xl">
-        <span class="text-xs text-gray-400">Win Rate</span>
-        <div id="winrate-val" class="text-xl md:text-2xl font-bold text-white mt-1">0.0%</div>
+      
+      <!-- CARD BARU 1: Active Bot Duration -->
+      <div class="bg-gray-900 border border-gray-800 p-3.5 rounded-xl">
+        <span class="text-[11px] text-gray-400">Active Bot Duration</span>
+        <div id="duration-val" class="text-lg md:text-xl font-bold text-sky-400 mt-1">0.0 Days</div>
       </div>
-      <div class="bg-gray-900 border border-gray-800 p-4 rounded-xl">
-        <span class="text-xs text-gray-400">Total Trades</span>
-        <div id="trades-val" class="text-xl md:text-2xl font-bold text-white mt-1">0</div>
+
+      <!-- CARD BARU 2: Average Daily Growth % -->
+      <div class="bg-gray-900 border border-gray-800 p-3.5 rounded-xl">
+        <span class="text-[11px] text-gray-400">Avg Daily Growth</span>
+        <div id="daily-growth-val" class="text-lg md:text-xl font-bold text-amber-400 mt-1">+0.00% / day</div>
+      </div>
+
+      <div class="bg-gray-900 border border-gray-800 p-3.5 rounded-xl">
+        <span class="text-[11px] text-gray-400">Win Rate</span>
+        <div id="winrate-val" class="text-lg md:text-xl font-bold text-white mt-1">0.0%</div>
+      </div>
+      <div class="bg-gray-900 border border-gray-800 p-3.5 rounded-xl">
+        <span class="text-[11px] text-gray-400">Total Trades</span>
+        <div id="trades-val" class="text-lg md:text-xl font-bold text-white mt-1">0</div>
       </div>
     </div>
 
@@ -195,13 +208,13 @@
         // Update PnL ($)
         const pnlElem = document.getElementById('pnl-val');
         pnlElem.innerText = `${s.total_pnl_usdt >= 0 ? '+' : ''}$${s.total_pnl_usdt.toFixed(2)}`;
-        pnlElem.className = `text-xl md:text-2xl font-bold mt-1 ${s.total_pnl_usdt >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+        pnlElem.className = `text-lg md:text-xl font-bold mt-1 ${s.total_pnl_usdt >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
         
         // Update PnL (%) Ratio vs Initial Equity
         const pnlPctRatio = (s.total_pnl_usdt / initialEquity) * 100;
         const pnlPctElem = document.getElementById('pnl-pct-val');
         pnlPctElem.innerText = `${pnlPctRatio >= 0 ? '+' : ''}${pnlPctRatio.toFixed(2)}%`;
-        pnlPctElem.className = `text-xl md:text-2xl font-bold mt-1 ${pnlPctRatio >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
+        pnlPctElem.className = `text-lg md:text-xl font-bold mt-1 ${pnlPctRatio >= 0 ? 'text-emerald-400' : 'text-rose-400'}`;
 
         document.getElementById('winrate-val').innerText = `${s.win_rate_pct.toFixed(1)}%`;
         document.getElementById('trades-val').innerText = s.total_trades;
@@ -288,7 +301,7 @@
           stratsList.innerHTML = `<div class="text-gray-500 text-xs italic">No winner strategies registered yet.</div>`;
         }
 
-        // 4. Render Trades Table & Growth Chart
+        // 4. Render Trades Table & Growth Chart & Kalkulasi Duration & Daily Growth
         const history = statsData.recent_trades;
         if (history && history.length > 0) {
           const sortedForTable = [...history].reverse();
@@ -311,6 +324,34 @@
           }).join('');
           document.getElementById('trade-history-rows').innerHTML = rowsHTML;
 
+          // --- KALKULASI ACTIVE BOT DURATION & AVG DAILY GROWTH ---
+          const firstTrade = history[0]; // Trade terlama (awal)
+          const lastTrade = history[history.length - 1]; // Trade terbaru (akhir)
+          
+          let activeDays = 0.1; // Fallback min agar tidak divide by zero
+          if (firstTrade && lastTrade) {
+            const startTime = new Date(firstTrade.entry_time || firstTrade.exit_time).getTime();
+            const endTime = new Date(lastTrade.exit_time).getTime();
+            const durationMs = Math.max(0, endTime - startTime);
+            activeDays = Math.max(0.01, durationMs / (1000 * 60 * 60 * 24));
+
+            // Format Tampilan Active Bot Duration
+            const durationElem = document.getElementById('duration-val');
+            if (activeDays >= 1.0) {
+              durationElem.innerText = `${activeDays.toFixed(1)} Days`;
+            } else {
+              const activeHours = (durationMs / (1000 * 60 * 60)).toFixed(1);
+              durationElem.innerText = `${activeHours} Hours`;
+            }
+          }
+
+          // Kalkulasi Average Daily Growth %
+          const avgDailyGrowth = pnlPctRatio / activeDays;
+          const dailyGrowthElem = document.getElementById('daily-growth-val');
+          dailyGrowthElem.innerText = `${avgDailyGrowth >= 0 ? '+' : ''}${avgDailyGrowth.toFixed(2)}% / day`;
+          dailyGrowthElem.className = `text-lg md:text-xl font-bold mt-1 ${avgDailyGrowth >= 0 ? 'text-amber-400' : 'text-rose-400'}`;
+
+          // Update Chart Data
           const chartLabels = ['Start', ...history.map(t => `#${t.id}`)];
           let runningBalance = 1000;
           const chartData = [1000, ...history.map(t => { 
