@@ -240,7 +240,9 @@ if os.path.exists("static"):
 
 @app.get("/")
 async def root_check():
-    return {"status": "ok", "service": "OKX Multi-Slot Futures Paper Trading Executor"}
+    if os.path.exists("static/index.html"):
+        return FileResponse("static/index.html")
+    return {"error": "Dashboard UI file (static/index.html) not found."}
 
 
 @app.get("/dashboard")
