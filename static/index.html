@@ -120,7 +120,7 @@
         <h2 class="text-xs font-semibold text-gray-400 tracking-wider uppercase">
           Active Positions (Concurrent Multi-Trade)
         </h2>
-        <span class="text-[11px] sm:text-xs text-gray-500">Margin/Slot: Dynamic, 12% of Equity @ 3x</span>
+        <span class="text-[11px] sm:text-xs text-gray-500">Margin/Position: Dynamic, 12% of Equity @ 3x</span>
       </div>
 
       <div id="positions-grid" class="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -233,7 +233,7 @@
         // Update Header Slot Badge
         const activeCount = posData.active_slots_count || 0;
         const maxSlots = posData.max_slots || 3;
-        document.getElementById('slot-status-badge').innerText = `SLOTS ACTIVE: ${activeCount}/${maxSlots}`;
+        document.getElementById('slot-status-badge').innerText = `ACTIVE POSITIONS: ${activeCount}/${maxSlots}`;
 
         // 2. Render Active Positions Grid (3 Slots)
         const posGrid = document.getElementById('positions-grid');
@@ -287,7 +287,7 @@
         } else {
           posGrid.innerHTML = `
             <div class="col-span-3 text-center py-8 text-gray-500 italic text-sm">
-              No active positions in any slot. Monitoring OKX feed for winner strategy triggers...
+              No active positions. Monitoring OKX feed for winner strategy triggers...
             </div>
           `;
         }
